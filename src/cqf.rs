@@ -1,27 +1,28 @@
 use std::{error::Error, usize, ops::BitAndAssign};
 use bitintr::{Pdep, Tzcnt, Popcnt};
-use bitvec::{prelude as bv, view::BitView, slice::BitSlice, field::BitField};
+use bitvec::{prelude as bv, view::BitView, field::BitField};
 use xxhash_rust::xxh3::xxh3_64;
+use itertools::Itertools;
 
 #[derive(Clone, Copy)]
 struct Block {
     offset: u16,
     occupieds: u64,
     runends: u64,
+    counts: u64,
     remainders: [u64; 64]
 }
 
 #[derive(Default)]
-pub struct RSQF {
+pub struct CQF {
     nslots: u64,
     nblocks: u64,
     quotient_bits: u64,
     remainder_bits: u64,
-    blocks: Vec<Block>,
-    iter_position: usize
+    blocks: Vec<Block>
 }
 
-impl RSQF {
+impl CQF {
     pub fn build(nslots: u64, key_bits: u64, value_bits: u64) -> Self {
         assert_eq!(nslots.popcnt(), 1, "nslots must be a power of 2!");
         let nblocks = nslots / 64;
@@ -31,10 +32,11 @@ impl RSQF {
                 offset: 0,
                 occupieds: 0,
                 runends: 0,
+                counts: 0,
                 remainders: [0; 64]
             });
         }
-        RSQF { 
+        CQF { 
             nslots: nslots,
             nblocks: nblocks,
             quotient_bits: key_bits, 
@@ -56,90 +58,54 @@ impl RSQF {
         return from;
     }
 
-    fn insert_bit_in_block(bits: &mut BitSlice<u64, bv::Lsb0>, from: usize, to: usize, bit: bool) -> bool {
-        //println!("bits -- from {}, to {}, len {}", from, to, bits.len());
-        //println!("before: {}", bits);
-        if to == bits.len() {
-            bits[from..to].rotate_right(1);
-        } else {
-            bits[from..=to].rotate_right(1);
+    fn find_n_empty_slots(&self, mut from: usize, mut n: usize) -> Vec<usize> {
+        let mut empties: Vec<usize> = Vec::with_capacity(n);
+        while n != 0 {
+            let empty = self.find_first_empty_slot(from);
+            empties.push(empty);
+            from = empty + 1;
+            n -= 1;
         }
-        let pushed_val = bits[from];
+        return empties;
+    }
+
+    fn shift_remainders(&mut self, insert_index: usize, empty_slot_index: usize, distance: usize) {
+        //println!("before remainders shift of {} between {} and {}: {:?}", distance, insert_index, empty_slot_index, self.get_block(insert_index / 64).remainders);
+        for i in (insert_index..=empty_slot_index).rev() {
+            self.set_slot(i + distance, self.get_slot(i));
+        }
         
-        bits.set(from, bit);
-        //println!("after: {}, pushed_val: {}", bits, pushed_val);
-        return pushed_val;
-    }
-
-    fn insert_remainders_in_block(remainders: &mut [u64], from: usize, to: usize, val: u64) -> u64 {
-        //println!("remainders -- from {}, to {}, len {}", from, to, remainders.len());
-        //println!("before: {:?}", remainders);
-        if to == remainders.len() {
-            remainders[from..to].rotate_right(1);
-        } else {
-            remainders[from..=to].rotate_right(1);
-        }
-        let pushed_val = remainders[from];
+        //for i in insert_index..insert_index + distance {
+        //    self.set_slot(i, 0);
+        //}
         
-        remainders[from] = val;
-        //println!("after: {:?}, pushed_val: {}", remainders, pushed_val);
-        return pushed_val;
+        //println!("after remainders shift: {:?}", self.get_block(insert_index / 64).remainders);
     }
 
-    fn shift_remainders(&mut self, insert_index: usize, empty_slot_index: usize) {
-        if insert_index != empty_slot_index {
-            let mut insert_block_idx = insert_index / 64;
-            let insert_block_offset = insert_index % 64;
-            let empty_block_idx = empty_slot_index / 64;
-            let empty_block_offset = empty_slot_index % 64;
-            if empty_block_idx == insert_block_idx {
-                Self::insert_remainders_in_block(&mut self.get_block_mut(insert_block_idx).remainders, insert_block_offset, empty_block_offset, 0);
-            } else {
-                let mut pushed_val = Self::insert_remainders_in_block(&mut self.get_block_mut(insert_block_idx).remainders, insert_block_offset, 64, 0);
-                insert_block_idx += 1;
-
-                while empty_block_idx != insert_block_idx {
-                    pushed_val = Self::insert_remainders_in_block(&mut self.get_block_mut(insert_block_idx).remainders, 0, 64, pushed_val);
-                    insert_block_idx += 1;
-                }
-
-                if empty_block_offset != 0 {
-                    Self::insert_remainders_in_block(&mut self.get_block_mut(insert_block_idx).remainders, 0, empty_block_offset, pushed_val);
-                } else {
-                    self.get_block_mut(insert_block_idx).remainders[0] = pushed_val;
-                }
-            }
+    fn shift_runends(&mut self, insert_index: usize, empty_slot_index: usize, distance: usize) {
+        //println!("before runends shift of {} between {} and {}: {}", distance, insert_index, empty_slot_index, self.get_block(insert_index / 64).runends.view_bits::<bv::Lsb0>());
+        for i in (insert_index..=empty_slot_index).rev() {
+            self.set_runend(i + distance, self.is_runend(i));
         }
+        
+        //for i in insert_index..insert_index + distance {
+        //    self.set_runend(i, false);
+        //}
+        
+        //println!("after runends shift: {}", self.get_block(insert_index / 64).runends.view_bits::<bv::Lsb0>());
     }
 
-    fn shift_runends(&mut self, insert_index: usize, empty_slot_index: usize) {
-        if insert_index != empty_slot_index {
-            // println!("insert slot {}, empty {}", insert_index, empty_slot_index);
-            let mut insert_block_idx = insert_index / 64;
-            let insert_block_offset = insert_index % 64;
-            let empty_block_idx = empty_slot_index / 64;
-            let empty_block_offset = empty_slot_index % 64;
-            if empty_block_idx == insert_block_idx {
-                Self::insert_bit_in_block(self.get_block_mut(insert_block_idx).runends.view_bits_mut::<bv::Lsb0>(), insert_block_offset, empty_block_offset, false);
-            } else {
-                //println!("shifting runends on block {}", insert_block_idx);
-                let mut pushed_val = Self::insert_bit_in_block(self.get_block_mut(insert_block_idx).runends.view_bits_mut::<bv::Lsb0>(), insert_block_offset, 64, false);
-                insert_block_idx += 1;
-
-                while empty_block_idx != insert_block_idx {
-                    //println!("shifting runends on block {}", insert_block_idx);
-                    pushed_val = Self::insert_bit_in_block(self.get_block_mut(insert_block_idx).runends.view_bits_mut::<bv::Lsb0>(), 0, 64, pushed_val);
-                    insert_block_idx += 1;
-                }
-
-                //println!("shifting runends on block {}", insert_block_idx);
-                if empty_block_offset != 0 {
-                    Self::insert_bit_in_block(self.get_block_mut(insert_block_idx).runends.view_bits_mut::<bv::Lsb0>(), 0, empty_block_offset, pushed_val);
-                } else {
-                    self.get_block_mut(insert_block_idx).runends.view_bits_mut::<bv::Lsb0>().set(0, pushed_val);
-                }
-            }
+    fn shift_counts(&mut self, insert_index: usize, empty_slot_index: usize, distance: usize) {
+        //println!("before counts shift of {} between {} and {}: {}", distance, insert_index, empty_slot_index, self.get_block(insert_index / 64).counts.view_bits::<bv::Lsb0>());
+        for i in (insert_index..=empty_slot_index).rev() {
+            self.set_count(i + distance, self.is_count(i));
         }
+        
+        //for i in insert_index..insert_index + distance {
+        //    self.set_count(i, false);
+        //}
+        
+        //println!("after counts shift: {}", self.get_block(insert_index / 64).counts.view_bits::<bv::Lsb0>());
     }
 
     fn offset_lower_bound(&self, index: usize) -> u64 {
@@ -149,10 +115,19 @@ impl RSQF {
         self.get_block(block_idx).offset_lower_bound(slot)
     }
 
-    pub fn insert(&mut self, item: &str) -> Result<(), Box<dyn Error>> {
-        self.insert1(item)
+    pub fn insert(&mut self, item: &str, count: u64) -> Result<(), Box<dyn Error>> {
+        let hash = self.calc_hash(item);
+        self.insert_by_hash(hash, count)
+        /*
+        if count == 1 {
+            self.insert1(item)
+        } else {
+            self.insert_more(item, count)
+        }
+        */
     }
 
+    /*
     fn insert1(&mut self, item: &str) -> Result<(), Box<dyn Error>> {
         let (quotient, remainder) = self.calc_qr(item);
         let quotient_block_offset: usize = quotient % 64;
@@ -284,10 +259,11 @@ impl RSQF {
             if operation >= 0 {
                 // println!("starting operations");
                 let empty_slot_index = self.find_first_empty_slot(runend_index + 1);
-                self.shift_remainders(insert_index, empty_slot_index);
+                self.shift_remainders(insert_index, empty_slot_index, 1);
                 self.set_slot(insert_index, new_value);
                 // println!("inserted element {} at slot {}", new_value, insert_index);
-                self.shift_runends(insert_index, empty_slot_index);
+                self.shift_runends(insert_index, empty_slot_index, 1);
+                self.shift_counts(insert_index, empty_slot_index, 1);
                 match operation {
                     0 => {
                         // self.get_block_mut(insert_index / 64).runends |= 1 << ((insert_index % 64) % 64);
@@ -331,199 +307,189 @@ impl RSQF {
         */
         Ok(())
     }
+    */
 
-    fn insert_more(&mut self, item: &str, count: usize) -> Result<(), Box<dyn Error>> {
-        let (quotient, remainder) = self.calc_qr(item);
-        let quotient_block_offset = quotient % 64;
+    pub fn insert_by_hash(&mut self, hash: u64, count: u64) -> Result<(), Box<dyn Error>> {
+        //println!("inserting quotient {} and remainder {}", quotient, remainder);
+        //println!("first run end call with quotient {}", quotient);
+        let (quotient, remainder) = self.calc_qr(hash);
         let runend_index = self.run_end(quotient);
 
         if self.might_be_empty(quotient) && runend_index == quotient {
+            //println!("fast path!");
             self.set_runend(quotient, true);
             self.set_slot(quotient, remainder);
             self.set_occupied(quotient, true);
+            //println!("fast path complete! inserted one of remainder {} into quotient {}", remainder, quotient);
             if count > 1 {
-                self.insert_more(item, count - 1);
+                //println!("calling again with count {}", count - 1);
+                self.insert_by_hash(hash, count - 1)?;
             }
         } else {
-            let runstart_index = if quotient == 0 { 0 } else { self.run_end(quotient - 1) + 1 };
-            
+            //println!("second run end call");
+            let mut runstart_index = if quotient == 0 { 0 } else { self.run_end(quotient - 1) + 1 };
+            if !self.is_occupied(quotient) {
+                self.insert_and_shift(0, quotient, remainder, count, runstart_index, 0);
+                //println!("we inserted at quotient {} (insert index {}) with op 0", quotient, runstart_index);
+            } else {
+                let (mut current_remainder, mut current_count, mut current_end): (u64, u64, usize) = (0, 0, 0);
+                current_end = self.decode_counter(runstart_index, &mut current_remainder, &mut current_count);
+                while current_remainder < remainder && !self.is_runend(current_end) {
+                    runstart_index = current_end + 1;
+                    current_end = self.decode_counter(runstart_index, &mut current_remainder, &mut current_count)
+                }
+
+                //println!("current remainder {} and remainder {}", current_remainder, remainder);
+                if current_remainder < remainder {
+                    self.insert_and_shift(1, quotient, remainder, count, current_end + 1, 0);
+                } else if current_remainder == remainder {
+                    self.insert_and_shift(if self.is_runend(current_end) { 1 } else { 2 }, quotient, remainder, current_count + count, runstart_index, current_end - runstart_index + 1);
+                } else {
+                    self.insert_and_shift(2, quotient, remainder, count, runstart_index, 0);
+                }
+            }
+            //println!("occupieds before: {}", self.get_block(quotient / 64).occupieds.view_bits::<bv::Lsb0>());
+            self.set_occupied(quotient, true);
+            //println!("we set quotient {} (slot {}) to occupied", quotient, quotient % 64);
+            //println!("occupieds after: {}", self.get_block(quotient / 64).occupieds.view_bits::<bv::Lsb0>());
         }
 
         Ok(())
     }
 
-    pub fn query(&self, item: &str) -> usize {
-        let (quotient, remainder) = self.calc_qr(item);
-        //println!("querying slot {} for remainder {}", quotient, remainder);
-        if !self.is_occupied(quotient) {
-            //println!("slot {} not occupied", quotient);
-            return 0;
-        } else {
-            //println!("slot occupied, bits are {:#066b} and slot is {}", self.get_block(quotient / 64).occupieds, quotient % 64);
+    fn insert_and_shift(&mut self, operation: u64, quotient: usize, remainder: u64, count: u64, insert_index: usize, noverwrites: usize) {
+        let ninserts = 2 - noverwrites;
+        let empties = self.find_n_empty_slots(insert_index, ninserts);
+        for j in (0..ninserts-1).rev() {
+            self.shift_remainders(empties[j] + 1, empties[j + 1] - 1, j + 1);
         }
+        self.shift_remainders(insert_index, empties[0] - 1, ninserts);
+        for j in (0..ninserts-1).rev() {
+            self.shift_runends(empties[j] + 1, empties[j + 1] - 1, j + 1);
+        }
+        self.shift_runends(insert_index, empties[0] - 1, ninserts);
+        for j in (0..ninserts-1).rev() {
+            self.shift_counts(empties[j] + 1, empties[j + 1] - 1, j + 1);
+        }
+        self.shift_counts(insert_index, empties[0] - 1, ninserts);
+        
+        self.set_slot(insert_index, remainder);
+        self.set_count(insert_index + 1, true);
+        self.set_slot(insert_index + 1, count);
 
+        match operation {
+            0 => {
+                self.set_runend(insert_index, false);
+                self.set_runend(insert_index + 1, true);
+            },
+            1 => {
+                if noverwrites == 0 {
+                    self.set_runend(insert_index - 1, false);
+                }
+                self.set_runend(insert_index, false);
+                self.set_runend(insert_index + 1, true);
+            },
+            2 => {
+                self.set_runend(insert_index, false);
+                self.set_runend(insert_index + 1, false);
+            },
+            _ => (),
+        }
+        //println!("completed insert and shift op {} with insert index {} (slot {})", operation, insert_index, insert_index % 64);
+        //println!("occupieds: {}", self.get_block(insert_index / 64).occupieds.view_bits::<bv::Lsb0>());
+        //println!("runends: {}", self.get_block(insert_index / 64).runends.view_bits::<bv::Lsb0>());
+        //println!("counts: {}", self.get_block(insert_index / 64).counts.view_bits::<bv::Lsb0>());
+        //println!("slots: {:?}", self.get_block(insert_index / 64).remainders);
+
+        let mut npreceding_empties = 0;
+        for i in (((quotient / 64) + 1)..).take_while(|i: &usize| *i <= empties[ninserts - 1] / 64) {
+            while npreceding_empties < ninserts && empties[npreceding_empties] / 64 < i {
+                npreceding_empties += 1;
+            }
+
+            self.get_block_mut(i).offset += (ninserts - npreceding_empties) as u16;
+            //println!("incremented offset on block {}", i);
+        }
+    }
+
+    pub fn query(&self, item: &str) -> u64 {
+        let (quotient, remainder) = self.calc_qr(self.calc_hash(item));
+        if !self.is_occupied(quotient) {
+            //println!("slot not occupied!");
+            return 0;
+        }
         let mut runstart_index = if quotient == 0 { 0 } else { self.run_end(quotient - 1) + 1 };
         if runstart_index < quotient {
             runstart_index = quotient;
         }
-        // println!("runstart index is {} for quotient {}", runstart_index, quotient);
-
         let mut current_end: usize;
         let mut current_remainder: u64 = 0;
-        let mut current_count: usize = 0;
+        let mut current_count: u64 = 0;
         loop {
             current_end = self.decode_counter(runstart_index, &mut current_remainder, &mut current_count);
-            // current_remainder >>= self.remainder_bits;
-            // println!("current remainder {}, remainder {}", current_remainder, remainder);
+            //println!("end: {}, remainder: {}, count: {}", current_end, current_remainder, current_count);
             if current_remainder == remainder {
                 return current_count;
             }
-            runstart_index = current_end + 1;
             if self.is_runend(current_end) { break; }
+            runstart_index = current_end + 1;
         }
 
-        // println!("end case, returning 0, current_count was {}", current_count);
+        //println!("none of the remainders we saw matched!");
         return 0;
     }
 
-    fn encode_counter(&self, remainder: u64, mut counter: u64, slots: &mut [u64; 67]) -> usize {
-        let mut digit = remainder;
-        let mut base = (1 << 32) - 1;
-        
-        if counter == 0 {
-            return 0;
+    pub fn merge(&self, other: &CQF, into: &mut CQF) -> Result<(), Box<dyn Error>> {
+        let merged = self.into_iter().merge(other.into_iter());
+        for item in merged {
+            into.insert_by_hash(item.hash, item.count)?;
         }
-        
-        slots[0] = remainder;
-        
-        if counter == 1 {
-            return 1;
-        }
-        
-        if counter == 2 {
-            slots[1] = remainder;
-            return 2;
-        }
-        
-        if counter == 3 && remainder == 0 {
-            slots[1] = remainder;
-            slots[2] = remainder;
-            return 3;
-        }
-        
-        if counter == 3 && remainder > 0 {
-            slots[1] = 0;
-            slots[2] = remainder;
-            return 3;
-        }
-        
-        if remainder == 0 {
-            slots[1] = remainder;
-        } else {
-            base -= 1;
-        }
-        
-        if remainder != 0 {
-            counter -= 3;
-        } else {
-            counter -= 4;
-        }
-        
-        let mut idx = 2;
-        loop {
-            digit = counter as u64 % base;
-            digit += 1;
-            if remainder != 0 && digit >= remainder {
-                digit += 1;
-            }
-            slots[idx] = digit;
-            counter /= base;
-            idx += 1;
-            if counter == 0 { break; }
-        }
-        
-        if remainder != 0 && digit >= remainder {
-            slots[idx] = 0;
-        }
-        
-        slots[idx + 1] = remainder;
-        
-        return idx + 1;
+        Ok(())
     }
 
-    fn decode_counter(&self, index: usize, remainder: &mut u64, count: &mut usize) -> usize {
-        //println!("decode counter on index {} (block {} slot {})", index, index / 64, index % 64);
-        let (base, rem, mut cnt, mut digit, mut end): (usize, u64, usize, u64, usize);
-
-        rem = self.get_slot(index);
-        *remainder = rem;
-
-        if self.is_runend(index) {
-            *count = 1;
-            return index;
+    pub fn multi_merge(&self, others: Vec<&CQF>, into: &mut CQF) -> Result<(), Box<dyn Error>> {
+        let mut qfs = vec![self];
+        qfs.extend(others);
+        let merged = qfs.into_iter().kmerge();
+        for item in merged {
+            into.insert_by_hash(item.hash, item.count)?;
         }
-
-        digit = self.get_slot(index + 1);
-
-        if self.is_runend(index + 1) || (rem > 0 && digit >= rem) {
-            *count = if digit == rem { 2 } else { 1 };
-            return index + (if digit == rem { 1 } else { 0 });
-        }
-
-        if rem > 0 && digit == 0 && self.get_slot(index + 2) == rem {
-            //println!("case 1");
-            *count = 3;
-            return index + 2;
-        }
-
-        if rem == 0 && digit == 0 {
-            if self.get_slot(index + 2) == 0 {
-                //println!("case 2");
-                *count = 3;
-                return index + 2;
-            } else {
-                *count = 2;
-                return index + 1;
-            }
-        }
-
-        cnt = 0;
-        base = (1 << self.remainder_bits) - (if rem != 0 { 2 } else { 1 });
-
-        end = index + 1;
-        while digit != rem && !self.is_runend(end) {
-            if digit > rem {
-                digit -= 1;
-            }
-            if digit != 0 && rem != 0 {
-                digit -= 1;
-            }
-            cnt = (cnt * base) + digit as usize;
-            end += 1;
-            digit = self.get_slot(end);
-            // println!("cnt {}, end {}, digit {}, rem {}", cnt, end, digit, rem);
-        }
-
-        if rem != 0 {
-            //println!("case 3");
-            *count = cnt + 3;
-            return end;
-        }
-
-        if self.is_runend(end) || self.get_slot(end + 1) != 0 {
-            *count = 1;
-            return index;
-        }
-
-        *count = cnt + 4;
-        return end + 1;
+        Ok(())
     }
 
-    fn calc_qr(&self, item: &str) -> (usize, u64) {
-        let hash = xxh3_64(item.as_bytes());
+    fn decode_counter(&self, index: usize, remainder: &mut u64, count: &mut u64) -> usize {
+        *remainder = self.get_slot(index);
+
+        // if it's a runend or the next thing is not a count, there's only one
+        if self.is_runend(index) || !self.is_count(index + 1) {
+            //println!("index {} was a runend or the next one was not a count!", index);
+            *count = 1;
+            return index; 
+        } else { // otherwise, whatever is in the next slot is the count
+            //println!("index {} has a count!", index);
+            *count = self.get_slot(index + 1);
+            return index + 1;
+        }
+    }
+
+    fn calc_hash(&self, item: &str) -> u64 {
+        xxh3_64(item.as_bytes())
+    }
+
+    fn calc_qr(&self, hash: u64) -> (usize, u64) {
         let quotient = (hash >> self.remainder_bits) & ((1 << self.quotient_bits) - 1);
         let remainder = hash & ((1 << self.remainder_bits) - 1);
+        // println!("we hashed to {:#066b} originally, reconstructed is {:#066b}", hash, self.build_hash(quotient as usize, remainder));
         (quotient as usize, remainder)
+    }
+
+    pub fn build_hash(&self, quotient: usize, remainder: u64) -> u64 {
+        let mut quotient = bv::BitVec::<_, bv::Lsb0>::from_element(quotient);
+        quotient.truncate(self.quotient_bits as usize);
+        let mut remainder = bv::BitVec::<_, bv::Lsb0>::from_element(remainder);
+        remainder.truncate(self.remainder_bits as usize);
+        remainder.append(&mut quotient);
+        remainder.load_le()
     }
 
     fn is_occupied(&self, index: usize) -> bool {
@@ -548,6 +514,18 @@ impl RSQF {
         let block_idx = index / 64;
         let slot = index % 64;
         self.get_block_mut(block_idx).set_runend(slot, val)
+    }
+
+    fn is_count(&self, index: usize) -> bool {
+        let block_idx = index / 64;
+        let slot = index % 64;
+        self.get_block(block_idx).is_count(slot)
+    }
+
+    fn set_count(&mut self, index: usize, val: bool) {
+        let block_idx = index / 64;
+        let slot = index % 64;
+        self.get_block_mut(block_idx).set_count(slot, val)
     }
 
     fn get_slot(&self, index: usize) -> u64 {
@@ -609,30 +587,39 @@ impl RSQF {
     fn run_end(&self, quotient: usize) -> usize {
         let block_idx: usize = quotient / 64;
         let intrablock_offset: usize = quotient % 64;
-        let block_offset: usize = self.get_block(block_idx).offset.into();
+        //println!("first get block in run_end");
+        let blocks_offset: usize = self.get_block(block_idx).offset.into();
         let intrablock_rank: usize = bitrank(self.get_block(block_idx).occupieds, intrablock_offset);
+        //println!("run end on quotient {} block {}: offset of {} and intrablock rank of {}", quotient, block_idx, blocks_offset, intrablock_rank);
+        //println!("occupieds: {}", self.get_block(block_idx).occupieds.view_bits::<bv::Lsb0>());
+        //println!("runends: {}", self.get_block(block_idx).runends.view_bits::<bv::Lsb0>());
 
         if intrablock_rank == 0 {
-            if block_offset <= intrablock_offset {
+            if blocks_offset <= intrablock_offset {
                 return quotient;
             } else {
-                return 64 * block_idx + block_offset - 1;
+                return 64 * block_idx + blocks_offset - 1;
             }
         }
 
-        let mut runend_block_index: usize = block_idx + block_offset / 64;
-        let mut runend_ignore_bits: usize = block_offset % 64;
+        let mut runend_block_index: usize = block_idx + blocks_offset / 64;
+        let mut runend_ignore_bits: usize = blocks_offset % 64;
         let mut runend_rank: usize = intrablock_rank - 1;
+        //println!("second get block in run_end");
         let mut runend_block_offset: usize = bitselectv(self.get_block(runend_block_index).runends, runend_ignore_bits, runend_rank);
 
         if runend_block_offset == 64 {
-            if block_offset == 0 && intrablock_rank == 0 {
+            if blocks_offset == 0 && intrablock_rank == 0 {
                 return quotient;
             } else {
                 loop {
+                    //println!("third get block in run_end");
                     runend_rank -= popcntv(self.get_block(runend_block_index).runends, runend_ignore_bits);
                     runend_block_index += 1;
                     runend_ignore_bits = 0;
+                    //println!("fourth get block in run_end");
+                    //println!("occupieds (block {}): {}", runend_block_index, self.get_block(runend_block_index).occupieds.view_bits::<bv::Lsb0>());
+                    //println!("runends (block {}): {}", runend_block_index, self.get_block(runend_block_index).runends.view_bits::<bv::Lsb0>());
                     runend_block_offset = bitselectv(self.get_block(runend_block_index).runends, runend_ignore_bits, runend_rank);
                     if runend_block_offset != 64 { break; }
                 }
@@ -648,21 +635,20 @@ impl RSQF {
     }
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, PartialOrd, Eq, Hash)]
 pub struct FilterItem {
-    key: usize,
-    remainder: u64,
-    count: usize
+    pub hash: u64,
+    pub count: u64
 }
 
 pub struct RSQFIterator<'a> {
-    qf: &'a RSQF,
+    qf: &'a CQF,
     position: usize,
     run: usize,
     first: bool
 }
 
-impl<'a> IntoIterator for &'a RSQF {
+impl<'a> IntoIterator for &'a CQF {
     type Item = FilterItem;
     type IntoIter = RSQFIterator<'a>;
 
@@ -694,7 +680,7 @@ impl<'a> RSQFIterator<'a> {
         if self.position >= self.qf.nslots as usize {
             return false;
         } else {
-            let (mut current_remainder, mut current_count): (u64, usize) = (0, 0);
+            let (mut current_remainder, mut current_count): (u64, u64) = (0, 0);
             self.position = self.qf.decode_counter(self.position, &mut current_remainder, &mut current_count);
             if !self.qf.is_runend(self.position) {
                 self.position += 1;
@@ -743,23 +729,23 @@ impl<'a> Iterator for RSQFIterator<'a> {
     fn next(&mut self) -> Option<Self::Item> {
         if self.first {
             self.first = false;
-            let (mut current_remainder, mut current_count): (u64, usize) = (0, 0);
+            let (mut current_remainder, mut current_count): (u64, u64) = (0, 0);
             self.qf.decode_counter(self.position, &mut current_remainder, &mut current_count);
-            return Some(FilterItem { key: self.position, remainder: current_remainder, count: current_count });
+            return Some(FilterItem { hash: self.qf.build_hash(self.run, current_remainder), count: current_count });
         }
         let can_move = self.move_position();
         if !can_move {
             return None;
         }
-        let (mut current_remainder, mut current_count): (u64, usize) = (0, 0);
+        let (mut current_remainder, mut current_count): (u64, u64) = (0, 0);
         self.qf.decode_counter(self.position, &mut current_remainder, &mut current_count);
-        Some(FilterItem { key: self.position, remainder: current_remainder, count: current_count })
+        Some(FilterItem { hash: self.qf.build_hash(self.run, current_remainder), count: current_count })
     }
 }
 
 impl Block {
     fn offset_lower_bound(&self, slot: u64) -> u64 {
-        // println!("offset lower bound of slot {}", slot);
+        //println!("offset lower bound of slot {}", slot);
         let mut occupieds = bv::BitVec::<_, bv::Lsb0>::from_element(self.occupieds);
         let occupieds_mask = bitmask(slot+1);
         occupieds.bitand_assign(occupieds_mask.view_bits::<bv::Lsb0>());
@@ -806,6 +792,14 @@ impl Block {
 
     fn set_runend(&mut self, slot: usize, bit: bool) {
         self.runends.view_bits_mut::<bv::Lsb0>().set(slot, bit)
+    }
+    
+    fn is_count(&self, slot: usize) -> bool {
+        self.counts.view_bits::<bv::Lsb0>()[slot]
+    }
+
+    fn set_count(&mut self, slot: usize, bit: bool) {
+        self.counts.view_bits_mut::<bv::Lsb0>().set(slot, bit)
     }
 
     fn set_slot(&mut self, slot: usize, value: u64) {
