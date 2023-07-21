@@ -25,14 +25,14 @@ mod tests {
         }
 
         for i in 0..n_strings/2 {
-            qf.insert(strings[i].as_str(), 3)?;
+            qf.insert(strings[i].as_bytes(), 3)?;
         }
         for i in 0..n_strings/2 {
-            assert!(qf.query(strings[i].as_str()) > 0, "false negative!");
+            assert!(qf.query(strings[i].as_bytes()) > 0, "false negative!");
         }
         let mut present: u32 = 0;
         for i in n_strings/2..n_strings {
-            if qf.query(strings[i].as_str()) > 0 {
+            if qf.query(strings[i].as_bytes()) > 0 {
                 present += 1;
             }
         }
@@ -58,18 +58,18 @@ mod tests {
         }
 
         for i in 0..n_strings/2 {
-            qf.insert(strings[i].as_str(), count)?;
+            qf.insert(strings[i].as_bytes(), count)?;
         }
         
         let mut present: u32 = 0;
         for i in 0..n_strings/2 {
-            assert!(qf.query(strings[i].as_str()) > 0, "false negative!");
-            if qf.query(strings[i].as_str()) > count {
+            assert!(qf.query(strings[i].as_bytes()) > 0, "false negative!");
+            if qf.query(strings[i].as_bytes()) > count {
                 present += 1;
             }
         }
         for i in n_strings/2..n_strings {
-            if qf.query(strings[i].as_str()) > 0 {
+            if qf.query(strings[i].as_bytes()) > 0 {
                 present += 1;
             }
         }
@@ -101,10 +101,10 @@ mod tests {
         }
 
         for i in 0..n_strings/2 {
-            qf1.insert(strings[i].as_str(), count)?;
+            qf1.insert(strings[i].as_bytes(), count)?;
         }
         for i in n_strings/2..n_strings {
-            qf2.insert(strings[i].as_str(), count)?;
+            qf2.insert(strings[i].as_bytes(), count)?;
         }
 
         let mut items = HashSet::with_capacity(n_strings);
@@ -125,7 +125,7 @@ mod tests {
         assert_eq!(diffs, 0);
 
         for i in 0..n_strings {
-            assert!(qf3.query(strings[i].as_str()) > 0, "false negative!");
+            assert!(qf3.query(strings[i].as_bytes()) > 0, "false negative!");
         }
         Ok(())
     }

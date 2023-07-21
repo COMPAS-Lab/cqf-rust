@@ -197,7 +197,7 @@ impl CQF {
         self.noccupied_slots as f32 / self.nslots as f32
     }
 
-    pub fn insert(&mut self, item: &str, count: u64) -> Result<(), Box<dyn Error>> {
+    pub fn insert(&mut self, item: &[u8], count: u64) -> Result<(), Box<dyn Error>> {
         if self.get_load_factor() >= 0.95 {
             println!("CQF is filling up, resizing...");
             self.resize(self.lognslots + 1, self.quotient_bits + 1);
@@ -297,7 +297,7 @@ impl CQF {
         self.noccupied_slots += ninserts as u64;
     }
 
-    pub fn query(&self, item: &str) -> u64 {
+    pub fn query(&self, item: &[u8]) -> u64 {
         let (quotient, remainder) = self.calc_qr(self.calc_hash(item));
         if !self.is_occupied(quotient) {
             return 0;
@@ -333,8 +333,8 @@ impl CQF {
         }
     }
 
-    fn calc_hash(&self, item: &str) -> u64 {
-        xxh3_64(item.as_bytes())
+    fn calc_hash(&self, item: &[u8]) -> u64 {
+        xxh3_64(item)
     }
 
     fn calc_qr(&self, hash: u64) -> (usize, u64) {
