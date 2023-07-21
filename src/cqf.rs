@@ -1,6 +1,6 @@
-use std::{error::Error, usize, ops::BitAndAssign};
+use std::{error::Error, usize};
 use bitintr::{Pdep, Tzcnt, Popcnt};
-use bitvec::{prelude as bv, view::BitView, field::BitField};
+//use bitvec::{prelude as bv, view::BitView, field::BitField};
 use xxhash_rust::xxh3::xxh3_64;
 use itertools::Itertools;
 
@@ -15,17 +15,22 @@ struct Block {
 
 #[derive(Default)]
 pub struct CQF {
+    lognslots: u64,
     nslots: u64,
+    xnslots: u64,
     nblocks: u64,
+    noccupied_slots: u64,
     quotient_bits: u64,
     remainder_bits: u64,
     blocks: Vec<Block>
 }
 
 impl CQF {
-    pub fn build(nslots: u64, key_bits: u64, value_bits: u64) -> Self {
+    pub fn build(lognslots: u64, key_bits: u64) -> Self {
+        let nslots = 1 << lognslots;
         assert_eq!(nslots.popcnt(), 1, "nslots must be a power of 2!");
-        let nblocks = nslots / 64;
+        let xnslots: u64 = (nslots as f32 + 10.0*((nslots as f32).sqrt())) as u64;
+        let nblocks = (xnslots + 63) / 64;
         let mut blockvec: Vec<Block> = Vec::with_capacity(nblocks.try_into().unwrap());
         for _ in 0..nblocks {
             blockvec.push(Block {
@@ -37,13 +42,110 @@ impl CQF {
             });
         }
         CQF { 
+            lognslots: lognslots,
             nslots: nslots,
+            xnslots: xnslots,
             nblocks: nblocks,
             quotient_bits: key_bits, 
-            remainder_bits: value_bits, 
+            remainder_bits: 64 - key_bits, 
             blocks: blockvec,
             ..Default::default()
         }
+    }
+
+    pub fn from(qf1: Self, qf2: Self, lognslots: u64, key_bits: u64) -> Self {
+        let nslots = 1 << lognslots;
+        assert_eq!(nslots.popcnt(), 1, "nslots must be a power of 2!");
+        let xnslots: u64 = (nslots as f32 + 10.0*((nslots as f32).sqrt())) as u64;
+        let nblocks = (xnslots + 63) / 64;
+        let mut blockvec: Vec<Block> = Vec::with_capacity(nblocks.try_into().unwrap());
+        for _ in 0..nblocks {
+            blockvec.push(Block {
+                offset: 0,
+                occupieds: 0,
+                runends: 0,
+                counts: 0,
+                remainders: [0; 64]
+            });
+        }
+        let mut new = CQF { 
+            lognslots: lognslots,
+            nslots: nslots,
+            xnslots: xnslots,
+            nblocks: nblocks,
+            quotient_bits: key_bits, 
+            remainder_bits: 64 - key_bits, 
+            blocks: blockvec,
+            ..Default::default()
+        };
+        let merged = qf1.into_iter().merge(qf2.into_iter());
+        for item in merged {
+            new.insert_by_hash(item.hash, item.count).expect("couldn't insert into new CQF!");
+        }
+        new
+    }
+
+    pub fn from_multi(qfs: Vec<&Self>, lognslots: u64, key_bits: u64) -> Self {
+        let nslots = 1 << lognslots;
+        assert_eq!(nslots.popcnt(), 1, "nslots must be a power of 2!");
+        let xnslots: u64 = (nslots as f32 + 10.0*((nslots as f32).sqrt())) as u64;
+        let nblocks = (xnslots + 63) / 64;
+        let mut blockvec: Vec<Block> = Vec::with_capacity(nblocks.try_into().unwrap());
+        for _ in 0..nblocks {
+            blockvec.push(Block {
+                offset: 0,
+                occupieds: 0,
+                runends: 0,
+                counts: 0,
+                remainders: [0; 64]
+            });
+        }
+        let mut new = Self { 
+            lognslots: lognslots,
+            nslots: nslots,
+            xnslots: xnslots,
+            nblocks: nblocks,
+            quotient_bits: key_bits, 
+            remainder_bits: 64 - key_bits, 
+            blocks: blockvec,
+            ..Default::default()
+        };
+        let merged = qfs.into_iter().kmerge();
+        for item in merged {
+            new.insert_by_hash(item.hash, item.count).expect("couldn't insert into new CQF!");
+        }
+        new
+    }
+
+    pub fn resize(&mut self, lognslots: u64, key_bits: u64) {
+        let nslots = 1 << lognslots;
+        assert_eq!(nslots.popcnt(), 1, "nslots must be a power of 2!");
+        let xnslots: u64 = (nslots as f32 + 10.0*((nslots as f32).sqrt())) as u64;
+        let nblocks = (xnslots + 63) / 64;
+        let mut blockvec: Vec<Block> = Vec::with_capacity(nblocks.try_into().unwrap());
+        for _ in 0..nblocks {
+            blockvec.push(Block {
+                offset: 0,
+                occupieds: 0,
+                runends: 0,
+                counts: 0,
+                remainders: [0; 64]
+            });
+        }
+        let mut new = Self { 
+            lognslots: lognslots,
+            nslots: nslots,
+            xnslots: xnslots,
+            nblocks: nblocks,
+            quotient_bits: key_bits, 
+            remainder_bits: 64 - key_bits, 
+            blocks: blockvec,
+            ..Default::default()
+        };
+        for item in self.into_iter() {
+            new.insert_by_hash(item.hash, item.count).expect("couldn't insert into new CQF!");
+        }
+        *self = new;
     }
 
     fn find_first_empty_slot(&self, mut from: usize) -> usize {
@@ -115,199 +217,20 @@ impl CQF {
         self.get_block(block_idx).offset_lower_bound(slot)
     }
 
+    pub fn get_load_factor(&self) -> f32 {
+        self.noccupied_slots as f32 / self.nslots as f32
+    }
+
     pub fn insert(&mut self, item: &str, count: u64) -> Result<(), Box<dyn Error>> {
+        if self.get_load_factor() >= 0.95 {
+            println!("CQF is filling up, resizing...");
+            self.resize(self.lognslots + 1, self.quotient_bits + 1);
+            println!("resize successful!");
+        }
+
         let hash = self.calc_hash(item);
         self.insert_by_hash(hash, count)
-        /*
-        if count == 1 {
-            self.insert1(item)
-        } else {
-            self.insert_more(item, count)
-        }
-        */
     }
-
-    /*
-    fn insert1(&mut self, item: &str) -> Result<(), Box<dyn Error>> {
-        let (quotient, remainder) = self.calc_qr(item);
-        let quotient_block_offset: usize = quotient % 64;
-        let block_idx = quotient / 64;
-        if self.is_empty(quotient) {
-            self.set_slot(quotient, remainder);
-            self.set_runend(quotient, true);
-            self.set_occupied(quotient, true);
-            // println!("insert finished into empty slot {}, new val is {}", quotient, self.get_slot(quotient));
-        } else {
-            // println!("slot {} is not empty", quotient);
-            let mut operation = 0;
-            let runend_index = self.run_end(quotient);
-            let mut insert_index = runend_index + 1;
-            let mut new_value = remainder;
-            let mut runstart_index = if quotient == 0 { 0 } else { self.run_end(quotient - 1) + 1 };
-
-            if self.get_block_mut(block_idx).is_occupied(quotient_block_offset) {
-                // println!("slot {} is occupied", quotient);
-                let mut current_remainder = self.get_slot(runstart_index);
-                let mut zero_terminator = runstart_index;
-
-                if current_remainder == 0 {
-                    let mut t = runstart_index + 1;
-                    while t < runend_index && self.get_slot(t) != 0 {
-                        t += 1;
-                    }
-                    if t < runend_index && self.get_slot(t+1) == 0 {
-                        zero_terminator = t + 1;
-                    } else if runstart_index < runend_index && self.get_slot(runstart_index + 1) == 0 {
-                        zero_terminator = runstart_index + 1;
-                    }
-                    if remainder != 0 {
-                        runstart_index = zero_terminator + 1;
-                        current_remainder = self.get_slot(runstart_index);
-                    }
-                }
-
-                while current_remainder < remainder && runstart_index <= runend_index {
-                    if runstart_index < runend_index && self.get_slot(runstart_index + 1) < current_remainder {
-                        runstart_index += 2;
-                        while runstart_index < runend_index && self.get_slot(runstart_index) != current_remainder {
-                            runstart_index += 1;
-                        }
-                        runstart_index += 1;
-                    } else {
-                        runstart_index += 1;
-                    }
-
-                    current_remainder = self.get_slot(runstart_index);
-                }
-
-                if runstart_index > runend_index {
-                    operation = 1;
-                    insert_index = runstart_index;
-                    new_value = remainder;
-                } else if current_remainder != remainder {
-                    operation = 2;
-                    insert_index = runstart_index;
-                    new_value = remainder;
-                } else if runstart_index == runend_index || (remainder > 0 && self.get_slot(runstart_index + 1) > remainder) || (remainder == 0 && zero_terminator == runstart_index) {
-                    operation = 2;
-                    insert_index = runstart_index;
-                    new_value = remainder;
-                } else if (remainder > 0 && self.get_slot(runstart_index + 1) == remainder) || (remainder == 0 && zero_terminator == runstart_index + 1) {
-                    operation = 2;
-                    insert_index = runstart_index + 1;
-                    new_value = 0;
-                } else if remainder == 0 && zero_terminator == runstart_index + 2 {
-                    operation = 2;
-                    insert_index = runstart_index + 1;
-                    new_value = 1;
-                } else {
-                    insert_index = runstart_index + 1;
-                    while self.get_slot(insert_index + 1) != remainder {
-                        insert_index += 1;
-                    }
-                    let (mut carry, mut digit);
-                    loop {
-                        carry = 0;
-                        digit = self.get_slot(insert_index);
-                        if digit == 0 {
-                            digit += 1;
-                            if digit == current_remainder {
-                                digit += 1;
-                            }
-                        }
-
-                        digit = (digit + 1) & bitmask(self.remainder_bits);
-
-                        if digit == 0 {
-                            digit += 1;
-                            carry = 1;
-                        }
-
-                        if digit == current_remainder {
-                            digit = (digit + 1) & bitmask(self.remainder_bits);
-                        }
-                        if digit == 0 {
-                            digit += 1;
-                            carry = 1;
-                        }
-
-                        self.set_slot(insert_index, digit);
-                        insert_index -= 1;
-                        if !(insert_index > runstart_index && carry != 0) {
-                            break;
-                        }
-                    }
-
-                    if insert_index == runstart_index && (carry > 0 || (current_remainder != 0 && digit >= current_remainder)) {
-                        operation = 2;
-                        insert_index = runstart_index + 1;
-                        if carry == 0 {
-                            new_value = 0;
-                        } else {
-                            new_value = 2;
-                            if current_remainder > 0 {
-                                assert!(new_value < current_remainder);
-                            }
-                        }
-                    } else {
-                        operation = -1;
-                        println!("huh");
-                    }
-                }
-            }
-
-            if operation >= 0 {
-                // println!("starting operations");
-                let empty_slot_index = self.find_first_empty_slot(runend_index + 1);
-                self.shift_remainders(insert_index, empty_slot_index, 1);
-                self.set_slot(insert_index, new_value);
-                // println!("inserted element {} at slot {}", new_value, insert_index);
-                self.shift_runends(insert_index, empty_slot_index, 1);
-                self.shift_counts(insert_index, empty_slot_index, 1);
-                match operation {
-                    0 => {
-                        // self.get_block_mut(insert_index / 64).runends |= 1 << ((insert_index % 64) % 64);
-                        self.set_runend(insert_index, true);
-                    },
-                    1 => {
-                        // self.get_block_mut((insert_index - 1) / 64).runends &= !(1 << (((insert_index - 1) % 64) % 64));
-                        // self.get_block_mut(insert_index / 64).runends |= 1 << ((insert_index % 64) % 64);
-                        self.set_runend(insert_index - 1, false);
-                        self.set_runend(insert_index, true);
-                    },
-                    2 => {
-                        // self.get_block_mut(insert_index / 64).runends &= !(1 << ((insert_index % 64) % 64));
-                        self.set_runend(insert_index, false);
-                    },
-                    other => panic!("Invalid operation {other}")
-                }
-
-                /*
-                if (empty_slot_index % 64 == 0) {
-                    println!("our empty slot is at the front of block {}!", empty_slot_index / 64);
-                }
-                if (empty_slot_index / 64) - (quotient/64) != 0 {
-                    println!("need to increment offsets on {} blocks", (empty_slot_index / 64) - (quotient/64));
-                }
-                */
-                for i in (((quotient / 64) + 1)..).take_while(|i: &usize| i <= &(empty_slot_index / 64)) {
-                    self.get_block_mut(i).offset += 1;
-                    //println!("incremented offset on block {}", i);
-                }
-            }
-            // self.get_block_mut(quotient / 64).occupieds |= 1 << (quotient % 64);
-            self.set_occupied(quotient, true);
-            // println!("operation {} finished", operation);
-            // println!("insert index was {} (offset was {})", insert_index, insert_index % 64);
-        }
-        /*
-        println!("insert complete for quotient {} remainder {}", quotient, remainder);
-        println!("occupied: {:#066b}", self.get_block(quotient / 64).occupieds);
-        println!("runends: {:#066b}", self.get_block(quotient / 64).runends);
-        */
-        Ok(())
-    }
-    */
 
     pub fn insert_by_hash(&mut self, hash: u64, count: u64) -> Result<(), Box<dyn Error>> {
         //println!("inserting quotient {} and remainder {}", quotient, remainder);
@@ -320,6 +243,7 @@ impl CQF {
             self.set_runend(quotient, true);
             self.set_slot(quotient, remainder);
             self.set_occupied(quotient, true);
+            self.noccupied_slots += 1;
             //println!("fast path complete! inserted one of remainder {} into quotient {}", remainder, quotient);
             if count > 1 {
                 //println!("calling again with count {}", count - 1);
@@ -332,7 +256,8 @@ impl CQF {
                 self.insert_and_shift(0, quotient, remainder, count, runstart_index, 0);
                 //println!("we inserted at quotient {} (insert index {}) with op 0", quotient, runstart_index);
             } else {
-                let (mut current_remainder, mut current_count, mut current_end): (u64, u64, usize) = (0, 0, 0);
+                let (mut current_remainder, mut current_count): (u64, u64) = (0, 0);
+                let mut current_end: usize;
                 current_end = self.decode_counter(runstart_index, &mut current_remainder, &mut current_count);
                 while current_remainder < remainder && !self.is_runend(current_end) {
                     runstart_index = current_end + 1;
@@ -410,6 +335,7 @@ impl CQF {
             self.get_block_mut(i).offset += (ninserts - npreceding_empties) as u16;
             //println!("incremented offset on block {}", i);
         }
+        self.noccupied_slots += ninserts as u64;
     }
 
     pub fn query(&self, item: &str) -> u64 {
@@ -439,24 +365,6 @@ impl CQF {
         return 0;
     }
 
-    pub fn merge(&self, other: &CQF, into: &mut CQF) -> Result<(), Box<dyn Error>> {
-        let merged = self.into_iter().merge(other.into_iter());
-        for item in merged {
-            into.insert_by_hash(item.hash, item.count)?;
-        }
-        Ok(())
-    }
-
-    pub fn multi_merge(&self, others: Vec<&CQF>, into: &mut CQF) -> Result<(), Box<dyn Error>> {
-        let mut qfs = vec![self];
-        qfs.extend(others);
-        let merged = qfs.into_iter().kmerge();
-        for item in merged {
-            into.insert_by_hash(item.hash, item.count)?;
-        }
-        Ok(())
-    }
-
     fn decode_counter(&self, index: usize, remainder: &mut u64, count: &mut u64) -> usize {
         *remainder = self.get_slot(index);
 
@@ -479,17 +387,20 @@ impl CQF {
     fn calc_qr(&self, hash: u64) -> (usize, u64) {
         let quotient = (hash >> self.remainder_bits) & ((1 << self.quotient_bits) - 1);
         let remainder = hash & ((1 << self.remainder_bits) - 1);
-        // println!("we hashed to {:#066b} originally, reconstructed is {:#066b}", hash, self.build_hash(quotient as usize, remainder));
+        //println!("we hashed to {:#066b} originally, reconstructed is {:#066b}", hash, self.build_hash(quotient as usize, remainder));
         (quotient as usize, remainder)
     }
 
     pub fn build_hash(&self, quotient: usize, remainder: u64) -> u64 {
+        /*
         let mut quotient = bv::BitVec::<_, bv::Lsb0>::from_element(quotient);
         quotient.truncate(self.quotient_bits as usize);
         let mut remainder = bv::BitVec::<_, bv::Lsb0>::from_element(remainder);
         remainder.truncate(self.remainder_bits as usize);
         remainder.append(&mut quotient);
         remainder.load_le()
+        */
+        ((quotient as u64) << self.remainder_bits) | remainder
     }
 
     fn is_occupied(&self, index: usize) -> bool {
@@ -573,6 +484,7 @@ impl CQF {
         }
     }
 
+    /*
     pub fn print_blocks(&self) {
         for (n, i) in (0..self.blocks.len()).enumerate() {
             let block = self.blocks[i];
@@ -583,6 +495,7 @@ impl CQF {
             }
         }
     }
+    */
 
     fn run_end(&self, quotient: usize) -> usize {
         let block_idx: usize = quotient / 64;
@@ -641,7 +554,7 @@ pub struct FilterItem {
     pub count: u64
 }
 
-pub struct RSQFIterator<'a> {
+pub struct CQFIterator<'a> {
     qf: &'a CQF,
     position: usize,
     run: usize,
@@ -650,7 +563,7 @@ pub struct RSQFIterator<'a> {
 
 impl<'a> IntoIterator for &'a CQF {
     type Item = FilterItem;
-    type IntoIter = RSQFIterator<'a>;
+    type IntoIter = CQFIterator<'a>;
 
     fn into_iter(self) -> Self::IntoIter {
         let mut position = 0;
@@ -666,7 +579,7 @@ impl<'a> IntoIterator for &'a CQF {
             position = block_index * 64 + idx;
         }
 
-        RSQFIterator {
+        CQFIterator {
             qf: self,
             position: if position == 0 { 0 } else { self.run_end(position - 1) + 1 },
             run: position as usize,
@@ -675,16 +588,16 @@ impl<'a> IntoIterator for &'a CQF {
     }
 }
 
-impl<'a> RSQFIterator<'a> {
+impl<'a> CQFIterator<'a> {
     fn move_position(&mut self) -> bool {
-        if self.position >= self.qf.nslots as usize {
+        if self.position >= self.qf.xnslots as usize {
             return false;
         } else {
             let (mut current_remainder, mut current_count): (u64, u64) = (0, 0);
             self.position = self.qf.decode_counter(self.position, &mut current_remainder, &mut current_count);
             if !self.qf.is_runend(self.position) {
                 self.position += 1;
-                if self.position >= self.qf.nslots as usize {
+                if self.position >= self.qf.xnslots as usize {
                     return false;
                 }
                 return true;
@@ -702,8 +615,8 @@ impl<'a> RSQFIterator<'a> {
                 }
 
                 if block_idx == self.qf.nblocks as usize {
-                    self.run = self.qf.nslots as usize;
-                    self.position = self.qf.nslots as usize;
+                    self.run = self.qf.xnslots as usize;
+                    self.position = self.qf.xnslots as usize;
                     return false;
                 }
 
@@ -713,7 +626,7 @@ impl<'a> RSQFIterator<'a> {
                     self.position = self.run;
                 }
 
-                if self.position >= self.qf.nslots as usize {
+                if self.position >= self.qf.xnslots as usize {
                     return false;
                 }
 
@@ -723,7 +636,7 @@ impl<'a> RSQFIterator<'a> {
     }
 }
 
-impl<'a> Iterator for RSQFIterator<'a> {
+impl<'a> Iterator for CQFIterator<'a> {
     type Item = FilterItem;
 
     fn next(&mut self) -> Option<Self::Item> {
@@ -746,15 +659,21 @@ impl<'a> Iterator for RSQFIterator<'a> {
 impl Block {
     fn offset_lower_bound(&self, slot: u64) -> u64 {
         //println!("offset lower bound of slot {}", slot);
+        /*
         let mut occupieds = bv::BitVec::<_, bv::Lsb0>::from_element(self.occupieds);
         let occupieds_mask = bitmask(slot+1);
         occupieds.bitand_assign(occupieds_mask.view_bits::<bv::Lsb0>());
+        */
+        let occupieds = self.occupieds & bitmask(slot+1);
         let offset_64: u64 = self.offset.into();
         if offset_64 <= slot {
+            /*
             let mut runends = bv::BitVec::<_, bv::Lsb0>::from_element(self.runends);
             let runends_mask = bitmask(slot);
             runends.bitand_assign(runends_mask.view_bits::<bv::Lsb0>());
             runends.shift_left(offset_64 as usize);
+            */
+            let runends = (self.runends & bitmask(slot)) >> offset_64;
        
             /*
             println!("offset lower bound of slot {}, occupied popcnt {}, runends popcnt {}, offset {}", slot, occupieds.load_le::<u64>().popcnt(), runends.load_le::<u64>().popcnt(), offset_64);
@@ -767,11 +686,15 @@ impl Block {
             println!("masked runend bits:\t\t{}", runends);
             */
             
+            /*
             let occupieds_popcnt = occupieds.load_le::<u64>().popcnt();
             let runends_popcnt = runends.load_le::<u64>().popcnt();
             return occupieds_popcnt - runends_popcnt;
+            */
+            return occupieds.popcnt() - runends.popcnt();
         }
-        return offset_64 - slot + occupieds.load_le::<u64>().popcnt();
+        return offset_64 - slot + occupieds.popcnt();
+        //return offset_64 - slot + occupieds.load_le::<u64>().popcnt();
     }
 
     fn is_empty(&self, slot: usize) -> bool {
@@ -779,27 +702,45 @@ impl Block {
     }
 
     fn is_occupied(&self, slot: usize) -> bool {
-        self.occupieds.view_bits::<bv::Lsb0>()[slot]
+        //self.occupieds.view_bits::<bv::Lsb0>()[slot]
+        ((self.occupieds >> slot) & 1) != 0
     }
 
     fn set_occupied(&mut self, slot: usize, bit: bool) {
-        self.occupieds.view_bits_mut::<bv::Lsb0>().set(slot, bit)
+        //self.occupieds.view_bits_mut::<bv::Lsb0>().set(slot, bit)
+        if bit {
+            self.occupieds |= 1 << slot;
+        } else {
+            self.occupieds &= !(1 << slot);
+        }
     }
 
     fn is_runend(&self, slot: usize) -> bool {
-        self.runends.view_bits::<bv::Lsb0>()[slot]
+        //self.runends.view_bits::<bv::Lsb0>()[slot]
+        ((self.runends >> slot) & 1) != 0
     }
 
     fn set_runend(&mut self, slot: usize, bit: bool) {
-        self.runends.view_bits_mut::<bv::Lsb0>().set(slot, bit)
+        //self.runends.view_bits_mut::<bv::Lsb0>().set(slot, bit)
+        if bit {
+            self.runends |= 1 << slot;
+        } else {
+            self.runends &= !(1 << slot);
+        }
     }
     
     fn is_count(&self, slot: usize) -> bool {
-        self.counts.view_bits::<bv::Lsb0>()[slot]
+        //self.counts.view_bits::<bv::Lsb0>()[slot]
+        ((self.counts >> slot) & 1) != 0
     }
 
     fn set_count(&mut self, slot: usize, bit: bool) {
-        self.counts.view_bits_mut::<bv::Lsb0>().set(slot, bit)
+        //self.counts.view_bits_mut::<bv::Lsb0>().set(slot, bit)
+        if bit {
+            self.counts |= 1 << slot;
+        } else {
+            self.counts &= !(1 << slot);
+        }
     }
 
     fn set_slot(&mut self, slot: usize, value: u64) {
