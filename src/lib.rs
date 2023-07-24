@@ -14,26 +14,38 @@ mod tests {
         let mut qf = CQF::build(23, 23);
 
         let n_strings: usize = 10_000_000;
-        let mut strings: Vec<String> = Vec::with_capacity(n_strings);
+        //let mut strings: Vec<String> = Vec::with_capacity(n_strings);
+        let mut numbers: Vec<u64> = Vec::with_capacity(n_strings);
 
+        let mut rng = rand::thread_rng();
         for _ in 0..n_strings {
+            /*
             let s: String = rand::thread_rng()
                 .sample_iter(&Alphanumeric)
                 .take(12)
                 .map(char::from)
                 .collect();
-            strings.push(s);
+                strings.push(s);
+            */
+            numbers.push(rng.gen())
         }
 
         for i in 0..n_strings/2 {
-            qf.insert(strings[i].as_bytes(), 3)?;
+            //qf.insert(strings[i].as_bytes(), 3)?;
+            qf.insert(numbers[i], 3)?;
         }
         for i in 0..n_strings/2 {
-            assert!(qf.query(strings[i].as_bytes()) > 0, "false negative!");
+            //assert!(qf.query(strings[i].as_bytes()) > 0, "false negative!");
+            assert!(qf.query(numbers[i]) > 0, "false negative!");
         }
         let mut present: u32 = 0;
         for i in n_strings/2..n_strings {
+            /*
             if qf.query(strings[i].as_bytes()) > 0 {
+                present += 1;
+            }
+            */
+            if qf.query(numbers[i]) > 0 {
                 present += 1;
             }
         }
@@ -47,30 +59,47 @@ mod tests {
 
         let n_strings: usize = 10_000_000;
         let count = 3;
-        let mut strings: Vec<String> = Vec::with_capacity(n_strings);
+        //let mut strings: Vec<String> = Vec::with_capacity(n_strings);
+        let mut numbers: Vec<u64> = Vec::with_capacity(n_strings);
 
+        let mut rng = rand::thread_rng();
         for _ in 0..n_strings {
+            /*
             let s: String = rand::thread_rng()
                 .sample_iter(&Alphanumeric)
                 .take(12)
                 .map(char::from)
                 .collect();
-            strings.push(s);
+                strings.push(s);
+            */
+            numbers.push(rng.gen())
         }
 
         for i in 0..n_strings/2 {
-            qf.insert(strings[i].as_bytes(), count)?;
+            //qf.insert(strings[i].as_bytes(), count)?;
+            qf.insert(numbers[i], count)?;
         }
         
         let mut present: u32 = 0;
         for i in 0..n_strings/2 {
+            /*
             assert!(qf.query(strings[i].as_bytes()) > 0, "false negative!");
             if qf.query(strings[i].as_bytes()) > count {
                 present += 1;
             }
+            */
+            assert!(qf.query(numbers[i]) > 0, "false negative!");
+            if qf.query(numbers[i]) > count {
+                present += 1;
+            }
         }
         for i in n_strings/2..n_strings {
+            /*
             if qf.query(strings[i].as_bytes()) > 0 {
+                present += 1;
+            }
+            */
+            if qf.query(numbers[i]) > 0 {
                 present += 1;
             }
         }
@@ -90,22 +119,29 @@ mod tests {
 
         let n_strings: usize = 10_000_000;
         let count = 3;
-        let mut strings: Vec<String> = Vec::with_capacity(n_strings);
+        //let mut strings: Vec<String> = Vec::with_capacity(n_strings);
+        let mut numbers: Vec<u64> = Vec::with_capacity(n_strings);
 
+        let mut rng = rand::thread_rng();
         for _ in 0..n_strings {
+            /*
             let s: String = rand::thread_rng()
                 .sample_iter(&Alphanumeric)
                 .take(12)
                 .map(char::from)
                 .collect();
-            strings.push(s);
+                strings.push(s);
+            */
+            numbers.push(rng.gen())
         }
 
         for i in 0..n_strings/2 {
-            qf1.insert(strings[i].as_bytes(), count)?;
+            //qf1.insert(strings[i].as_bytes(), count)?;
+            qf1.insert(numbers[i], count)?;
         }
         for i in n_strings/2..n_strings {
-            qf2.insert(strings[i].as_bytes(), count)?;
+            //qf2.insert(strings[i].as_bytes(), count)?;
+            qf2.insert(numbers[i], count)?;
         }
 
         let mut items = HashSet::with_capacity(n_strings);
@@ -126,7 +162,8 @@ mod tests {
         assert_eq!(diffs, 0);
 
         for i in 0..n_strings {
-            assert!(qf3.query(strings[i].as_bytes()) > 0, "false negative!");
+            //assert!(qf3.query(strings[i].as_bytes()) > 0, "false negative!");
+            assert!(qf3.query(numbers[i]) > 0, "false negative!");
         }
         Ok(())
     }
@@ -136,26 +173,38 @@ mod tests {
         let mut qf = CQF::build(23, 23);
 
         let n_strings: usize = 10_000_000;
-        let mut strings: Vec<String> = Vec::with_capacity(n_strings);
+        //let mut strings: Vec<String> = Vec::with_capacity(n_strings);
+        let mut numbers: Vec<u64> = Vec::with_capacity(n_strings);
 
+        let mut rng = rand::thread_rng();
         for _ in 0..n_strings {
+            /*
             let s: String = rand::thread_rng()
                 .sample_iter(&Alphanumeric)
                 .take(12)
                 .map(char::from)
                 .collect();
-            strings.push(s);
+                strings.push(s);
+            */
+            numbers.push(rng.gen())
         }
 
         for i in 0..n_strings/2 {
-            qf.insert(strings[i].as_bytes(), 3)?;
+            //qf.insert(strings[i].as_bytes(), 3)?;
+            qf.insert(numbers[i], 3)?;
         }
         for i in 0..n_strings/2 {
-            assert!(qf.query(strings[i].as_bytes()) > 0, "false negative!");
+            //assert!(qf.query(strings[i].as_bytes()) > 0, "false negative!");
+            assert!(qf.query(numbers[i]) > 0, "false negative!");
         }
         let mut present: u32 = 0;
         for i in n_strings/2..n_strings {
+            /*
             if qf.query(strings[i].as_bytes()) > 0 {
+                present += 1;
+            }
+            */
+            if qf.query(numbers[i]) > 0 {
                 present += 1;
             }
         }
