@@ -1,9 +1,11 @@
-use std::{error::Error, usize};
+use std::{usize, path::PathBuf, fs::File};
 use bitintr::{Pdep, Tzcnt, Popcnt};
 use xxhash_rust::xxh3::xxh3_64;
 use itertools::Itertools;
+use bincode::{Encode, Decode};
+use anyhow::Result;
 
-#[derive(Clone, Copy)]
+#[derive(Encode, Decode, Clone, Copy)]
 struct Block {
     offset: u16,
     occupieds: u64,
@@ -12,7 +14,7 @@ struct Block {
     remainders: [u64; 64]
 }
 
-#[derive(Default)]
+#[derive(Encode, Decode, Default)]
 pub struct CQF {
     lognslots: u64,
     nslots: u64,
@@ -147,6 +149,18 @@ impl CQF {
         *self = new;
     }
 
+    pub fn serialize(&self, path: PathBuf) -> Result<()> {
+        let mut file = File::create(path)?;
+        bincode::encode_into_std_write(self, &mut file, bincode::config::standard())?;
+        Ok(())
+    }
+
+    pub fn deserialize(path: PathBuf) -> Result<Self> {
+        let mut file = File::open(path)?;
+        let deserialized: CQF = bincode::decode_from_std_read(&mut file, bincode::config::standard())?;
+        Ok(deserialized)
+    }
+
     fn find_first_empty_slot(&self, mut from: usize) -> usize {
         loop {
             let t = self.offset_lower_bound(from);
@@ -197,7 +211,7 @@ impl CQF {
         self.noccupied_slots as f32 / self.nslots as f32
     }
 
-    pub fn insert(&mut self, item: &[u8], count: u64) -> Result<(), Box<dyn Error>> {
+    pub fn insert(&mut self, item: &[u8], count: u64) -> Result<()> {
         if self.get_load_factor() >= 0.95 {
             println!("CQF is filling up, resizing...");
             self.resize(self.lognslots + 1, self.quotient_bits + 1);
@@ -208,7 +222,7 @@ impl CQF {
         self.insert_by_hash(hash, count)
     }
 
-    pub fn insert_by_hash(&mut self, hash: u64, count: u64) -> Result<(), Box<dyn Error>> {
+    pub fn insert_by_hash(&mut self, hash: u64, count: u64) -> Result<()> {
         let (quotient, remainder) = self.calc_qr(hash);
         let runend_index = self.run_end(quotient);
 

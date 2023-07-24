@@ -3,13 +3,14 @@ pub use cqf::CQF;
 
 #[cfg(test)]
 mod tests {
-    use std::{error::Error, collections::HashSet};
+    use std::{collections::HashSet, path::PathBuf}; 
 
     use super::*;
     use rand::{distributions::Alphanumeric, Rng};
+    use anyhow::Result;
 
     #[test]
-    fn insert() -> Result<(), Box<dyn Error>> {
+    fn insert() -> Result<()> {
         let mut qf = CQF::build(23, 23);
 
         let n_strings: usize = 10_000_000;
@@ -41,7 +42,7 @@ mod tests {
     }
 
     #[test]
-    fn enumerate() -> Result<(), Box<dyn Error>> {
+    fn enumerate() -> Result<()> {
         let mut qf = CQF::build(25, 25);
 
         let n_strings: usize = 10_000_000;
@@ -83,7 +84,7 @@ mod tests {
     }
 
     #[test]
-    fn merge() -> Result<(), Box<dyn Error>> {
+    fn merge() -> Result<()> {
         let mut qf1 = CQF::build(25, 25);
         let mut qf2 = CQF::build(25, 25);
 
@@ -127,6 +128,52 @@ mod tests {
         for i in 0..n_strings {
             assert!(qf3.query(strings[i].as_bytes()) > 0, "false negative!");
         }
+        Ok(())
+    }
+
+    #[test]
+    fn serialize() -> Result<()> {
+        let mut qf = CQF::build(23, 23);
+
+        let n_strings: usize = 10_000_000;
+        let mut strings: Vec<String> = Vec::with_capacity(n_strings);
+
+        for _ in 0..n_strings {
+            let s: String = rand::thread_rng()
+                .sample_iter(&Alphanumeric)
+                .take(12)
+                .map(char::from)
+                .collect();
+            strings.push(s);
+        }
+
+        for i in 0..n_strings/2 {
+            qf.insert(strings[i].as_bytes(), 3)?;
+        }
+        for i in 0..n_strings/2 {
+            assert!(qf.query(strings[i].as_bytes()) > 0, "false negative!");
+        }
+        let mut present: u32 = 0;
+        for i in n_strings/2..n_strings {
+            if qf.query(strings[i].as_bytes()) > 0 {
+                present += 1;
+            }
+        }
+        assert_eq!(present, 0);
+
+        qf.serialize(PathBuf::from("/home/ari/Documents/GitHub/cqf-rust/serialize-test.cqf"))?;
+        let read_qf = CQF::deserialize(PathBuf::from("/home/ari/Documents/GitHub/cqf-rust/serialize-test.cqf"))?;
+        let mut items = HashSet::with_capacity(n_strings);
+        for item in qf.into_iter() {
+            items.insert(item);
+        }
+
+        let mut serial_items = HashSet::with_capacity(n_strings);
+        for item in read_qf.into_iter() {
+            serial_items.insert(item);
+        }
+        let diffs = serial_items.symmetric_difference(&items).count();
+        assert_eq!(diffs, 0);
         Ok(())
     }
 }
