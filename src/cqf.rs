@@ -264,51 +264,53 @@ impl CQF {
 
     fn insert_and_shift(&mut self, operation: u64, quotient: usize, remainder: u64, count: u64, insert_index: usize, noverwrites: usize) {
         let ninserts = 2 - noverwrites;
-        let empties = self.find_n_empty_slots(insert_index, ninserts);
-        for j in (0..ninserts-1).rev() {
-            self.shift_remainders(empties[j] + 1, empties[j + 1] - 1, j + 1);
+        if ninserts > 0 {
+            let empties = self.find_n_empty_slots(insert_index, ninserts);
+            for j in (0..ninserts-1).rev() {
+                self.shift_remainders(empties[j] + 1, empties[j + 1] - 1, j + 1);
+            }
+            self.shift_remainders(insert_index, empties[0] - 1, ninserts);
+            for j in (0..ninserts-1).rev() {
+                self.shift_runends(empties[j] + 1, empties[j + 1] - 1, j + 1);
+            }
+            self.shift_runends(insert_index, empties[0] - 1, ninserts);
+            for j in (0..ninserts-1).rev() {
+                self.shift_counts(empties[j] + 1, empties[j + 1] - 1, j + 1);
+            }
+            self.shift_counts(insert_index, empties[0] - 1, ninserts);
+
+            match operation {
+                0 => {
+                    self.set_runend(insert_index, false);
+                    self.set_runend(insert_index + 1, true);
+                },
+                1 => {
+                    if noverwrites == 0 {
+                        self.set_runend(insert_index - 1, false);
+                    }
+                    self.set_runend(insert_index, false);
+                    self.set_runend(insert_index + 1, true);
+                },
+                2 => {
+                    self.set_runend(insert_index, false);
+                    self.set_runend(insert_index + 1, false);
+                },
+                _ => (),
+            }
+
+            let mut npreceding_empties = 0;
+            for i in (((quotient / 64) + 1)..).take_while(|i: &usize| *i <= empties[ninserts - 1] / 64) {
+                while npreceding_empties < ninserts && empties[npreceding_empties] / 64 < i {
+                    npreceding_empties += 1;
+                }
+
+                self.get_block_mut(i).offset += (ninserts - npreceding_empties) as u16;
+            }
         }
-        self.shift_remainders(insert_index, empties[0] - 1, ninserts);
-        for j in (0..ninserts-1).rev() {
-            self.shift_runends(empties[j] + 1, empties[j + 1] - 1, j + 1);
-        }
-        self.shift_runends(insert_index, empties[0] - 1, ninserts);
-        for j in (0..ninserts-1).rev() {
-            self.shift_counts(empties[j] + 1, empties[j + 1] - 1, j + 1);
-        }
-        self.shift_counts(insert_index, empties[0] - 1, ninserts);
         
         self.set_slot(insert_index, remainder);
         self.set_count(insert_index + 1, true);
         self.set_slot(insert_index + 1, count);
-
-        match operation {
-            0 => {
-                self.set_runend(insert_index, false);
-                self.set_runend(insert_index + 1, true);
-            },
-            1 => {
-                if noverwrites == 0 {
-                    self.set_runend(insert_index - 1, false);
-                }
-                self.set_runend(insert_index, false);
-                self.set_runend(insert_index + 1, true);
-            },
-            2 => {
-                self.set_runend(insert_index, false);
-                self.set_runend(insert_index + 1, false);
-            },
-            _ => (),
-        }
-
-        let mut npreceding_empties = 0;
-        for i in (((quotient / 64) + 1)..).take_while(|i: &usize| *i <= empties[ninserts - 1] / 64) {
-            while npreceding_empties < ninserts && empties[npreceding_empties] / 64 < i {
-                npreceding_empties += 1;
-            }
-
-            self.get_block_mut(i).offset += (ninserts - npreceding_empties) as u16;
-        }
         self.noccupied_slots += ninserts as u64;
     }
 
