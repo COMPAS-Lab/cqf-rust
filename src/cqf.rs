@@ -1,4 +1,5 @@
 use std::{usize, path::PathBuf, fs::File};
+use std::io::{BufWriter, BufReader};
 use bitintr::{Pdep, Tzcnt, Popcnt};
 use xxhash_rust::xxh3::xxh3_64;
 use itertools::Itertools;
@@ -150,13 +151,13 @@ impl CQF {
     }
 
     pub fn serialize(&self, path: PathBuf) -> Result<()> {
-        let mut file = File::create(path)?;
+        let mut file = BufWriter::new(File::create(path)?);
         bincode::encode_into_std_write(self, &mut file, bincode::config::standard())?;
         Ok(())
     }
 
     pub fn deserialize(path: PathBuf) -> Result<Self> {
-        let mut file = File::open(path)?;
+        let mut file = BufReader::new(File::open(path)?);
         let deserialized: CQF = bincode::decode_from_std_read(&mut file, bincode::config::standard())?;
         Ok(deserialized)
     }
