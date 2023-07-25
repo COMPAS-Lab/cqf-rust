@@ -360,14 +360,14 @@ impl CQF {
         }
     }
 
-    fn calc_hash(&self, mut item: u64) -> u64 {
-        //xxh3_64(item)
-        item ^= item >> 16;
-        item *= 0xa812d533;
-        item ^= item >> 15;
-        item *= 0xb278e4ad;
-        item ^= item >> 17;
-        item
+    fn calc_hash(&self, item: u64) -> u64 {
+        xxh3_64(&item.to_le_bytes())
+        //item ^= item >> 16;
+        //item *= 0xa812d533;
+        //item ^= item >> 15;
+        //item *= 0xb278e4ad;
+        //item ^= item >> 17;
+        //item
     }
 
     fn calc_qr(&self, hash: u64) -> (usize, u64) {
