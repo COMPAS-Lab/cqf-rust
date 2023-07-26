@@ -3,10 +3,10 @@ pub use cqf::CQF;
 
 #[cfg(test)]
 mod tests {
-    use std::{collections::HashSet, path::PathBuf}; 
+    use std::{collections::HashSet, path::PathBuf, time::Instant}; 
 
     use super::*;
-    use rand::{distributions::Alphanumeric, Rng};
+    use rand::Rng;
     use anyhow::Result;
 
     #[test]
@@ -50,6 +50,22 @@ mod tests {
             }
         }
         assert_eq!(present, 0);
+        Ok(())
+    }
+
+    #[test]
+    fn insert_bench() -> Result<()> {
+        let mut qf = CQF::build(26, 26);
+
+        let n_strings: usize = ((1 << 26) as f32 * 0.9) as usize;
+
+        let now = Instant::now();
+        for i in 1..n_strings+1 {
+            //qf.insert(strings[i].as_bytes(), 3)?;
+            qf.insert(i as u64, 1)?;
+        }
+        let elapsed = now.elapsed();
+        println!("insert took {} seconds!", elapsed.as_secs());
         Ok(())
     }
 

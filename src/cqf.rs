@@ -174,14 +174,18 @@ impl CQF {
     }
 
     fn find_n_empty_slots(&self, mut from: usize, mut n: usize) -> Vec<usize> {
-        let mut empties: Vec<usize> = Vec::with_capacity(n);
-        while n != 0 {
-            let empty = self.find_first_empty_slot(from);
-            empties.push(empty);
-            from = empty + 1;
-            n -= 1;
+        if n == 1 {
+            return vec![self.find_first_empty_slot(from)];
+        } else {
+            let mut empties: Vec<usize> = Vec::with_capacity(n);
+            while n != 0 {
+                let empty = self.find_first_empty_slot(from);
+                empties.push(empty);
+                from = empty + 1;
+                n -= 1;
+            }
+            return empties;
         }
-        return empties;
     }
 
     fn shift_remainders(&mut self, insert_index: usize, empty_slot_index: usize, distance: usize) {
@@ -209,7 +213,7 @@ impl CQF {
     }
 
     pub fn get_load_factor(&self) -> f32 {
-        self.noccupied_slots as f32 / self.nslots as f32
+        self.noccupied_slots as f32 / self.xnslots as f32
     }
 
     pub fn check_and_resize(&mut self) {
@@ -269,7 +273,7 @@ impl CQF {
     }
 
     fn insert_and_shift(&mut self, operation: u64, quotient: usize, remainder: u64, count: u64, insert_index: usize, noverwrites: usize) {
-        let ninserts = 2 - noverwrites;
+        let ninserts = if count == 1 { 1 } else { 2 } - noverwrites;
         if ninserts > 0 {
             let empties = self.find_n_empty_slots(insert_index, ninserts);
             for j in (0..ninserts-1).rev() {
@@ -287,19 +291,31 @@ impl CQF {
 
             match operation {
                 0 => {
-                    self.set_runend(insert_index, false);
-                    self.set_runend(insert_index + 1, true);
+                    if count == 1 {
+                        self.set_runend(insert_index, true);
+                    } else {
+                        self.set_runend(insert_index, false);
+                        self.set_runend(insert_index + 1, true);
+                    }
                 },
                 1 => {
                     if noverwrites == 0 {
                         self.set_runend(insert_index - 1, false);
                     }
-                    self.set_runend(insert_index, false);
-                    self.set_runend(insert_index + 1, true);
+                    if count == 1 {
+                        self.set_runend(insert_index, true);
+                    } else {
+                        self.set_runend(insert_index, false);
+                        self.set_runend(insert_index + 1, true);
+                    }
                 },
                 2 => {
-                    self.set_runend(insert_index, false);
-                    self.set_runend(insert_index + 1, false);
+                    if count == 1 {
+                        self.set_runend(insert_index, false);
+                    } else {
+                        self.set_runend(insert_index, false);
+                        self.set_runend(insert_index + 1, false);
+                    }
                 },
                 _ => (),
             }
@@ -315,8 +331,11 @@ impl CQF {
         }
         
         self.set_slot(insert_index, remainder);
-        self.set_count(insert_index + 1, true);
-        self.set_slot(insert_index + 1, count);
+        if count != 1 {
+            // if the count isn't one, put a count in the next slot
+            self.set_count(insert_index + 1, true);
+            self.set_slot(insert_index + 1, count);
+        }
         self.noccupied_slots += ninserts as u64;
     }
 
@@ -428,21 +447,10 @@ impl CQF {
         self.get_block_mut(block_idx).set_slot(slot, val)
     }
 
-    fn is_empty(&self, index: usize) -> bool {
-        let block_idx = index / 64;
-        let slot = index % 64;
-        self.get_block(block_idx).is_empty(slot)
-    }
-
     fn might_be_empty(&self, index: usize) -> bool {
         let block_idx = index / 64;
         let slot = index % 64;
         !self.get_block(block_idx).is_occupied(slot) && !self.get_block(block_idx).is_runend(slot)
-    }
-
-    fn get_offset(&self, index: usize) -> u16 {
-        let block_idx = index / 64;
-        self.get_block(block_idx).offset
     }
 
     fn get_block(&self, block_idx: usize) -> &Block {
@@ -619,10 +627,6 @@ impl Block {
             return occupieds.popcnt() - runends.popcnt();
         }
         return offset_64 - slot + occupieds.popcnt();
-    }
-
-    fn is_empty(&self, slot: usize) -> bool {
-        self.offset_lower_bound(slot.try_into().unwrap()) == 0
     }
 
     fn is_occupied(&self, slot: usize) -> bool {
