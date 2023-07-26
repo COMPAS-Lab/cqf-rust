@@ -3,7 +3,7 @@ pub use cqf::*;
 
 #[cfg(test)]
 mod tests {
-    use std::{collections::HashSet, path::PathBuf, time::Instant}; 
+    use std::{collections::HashSet, path::PathBuf}; 
 
     use super::*;
     use rand::Rng;
@@ -50,28 +50,6 @@ mod tests {
             }
         }
         assert_eq!(present, 0);
-        Ok(())
-    }
-
-    #[test]
-    fn insert_bench() -> Result<()> {
-        let mut qf = CQF::build(26, 26, HashMode::Invertible);
-
-        let n_strings: usize = ((1 << 26) as f32 * 0.9) as usize;
-        let mut numbers: Vec<u64> = Vec::with_capacity(n_strings);
-
-        let mut rng = rand::thread_rng();
-        for _ in 0..n_strings {
-            numbers.push(rng.gen())
-        }
-
-        let now = Instant::now();
-        for i in 0..n_strings {
-            //qf.insert(strings[i].as_bytes(), 3)?;
-            qf.insert(numbers[i] as u64, 1)?;
-        }
-        let elapsed = now.elapsed();
-        println!("insert took {} seconds!", elapsed.as_secs());
         Ok(())
     }
 
@@ -192,7 +170,7 @@ mod tests {
 
     #[test]
     fn serialize() -> Result<()> {
-        let mut qf = CQF::build(23, 23, HashMode::Fast);
+        let mut qf = CQF::build(23, 23, HashMode::Invertible);
 
         let n_strings: usize = 10_000_000;
         //let mut strings: Vec<String> = Vec::with_capacity(n_strings);
@@ -245,6 +223,50 @@ mod tests {
         }
         let diffs = serial_items.symmetric_difference(&items).count();
         assert_eq!(diffs, 0);
+        Ok(())
+    }
+
+    #[test]
+    fn invert() -> Result<()> {
+        let mut qf = CQF::build(25, 25, HashMode::Invertible);
+
+        let n_vals: usize = 10_000_000;
+        let count = 3;
+        let mut numbers: Vec<u64> = Vec::with_capacity(n_vals);
+
+        let mut rng = rand::thread_rng();
+        for _ in 0..n_vals {
+            let number = rng.gen();
+            numbers.push(number);
+        }
+
+        let mut number_set: HashSet<u64> = HashSet::with_capacity(n_vals);
+        for i in 0..n_vals/2 {
+            qf.insert(numbers[i], count)?;
+            number_set.insert(numbers[i]);
+        }
+        
+        let mut present: u32 = 0;
+        for i in 0..n_vals/2 {
+            assert!(qf.query(numbers[i]) > 0, "false negative!");
+            if qf.query(numbers[i]) > count {
+                present += 1;
+            }
+        }
+        for i in n_vals/2..n_vals {
+            if qf.query(numbers[i]) > 0 {
+                present += 1;
+            }
+        }
+        assert_eq!(present, 0);
+        let mut counter = 0;
+        let mut enumerated_set: HashSet<u64> = HashSet::with_capacity(n_vals);
+        for item in qf.into_iter() {
+            enumerated_set.insert(item.item.unwrap());
+            counter += 1;
+        }
+        assert_eq!(counter, n_vals / 2, "we didn't get the right number of enumerated items!");
+        assert!(enumerated_set == number_set, "enumerated items don't match originals!");
         Ok(())
     }
 }

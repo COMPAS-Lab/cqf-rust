@@ -396,15 +396,59 @@ impl CQF {
     fn calc_hash(&self, item: u64) -> u64 {
         match self.hash_mode {
             HashMode::Invertible => {
-                let mut tmp = item;
-                tmp ^= tmp >> 16;
-                tmp *= 0xa812d533;
-                tmp ^= tmp >> 15;
-                tmp *= 0xb278e4ad;
-                tmp ^= tmp >> 17;
-                tmp
+                let mut key = item;
+                key = (!key).wrapping_add(key << 21); // key = (key << 21) - key - 1;
+                key = key ^ (key >> 24);
+                key = (key + (key << 3)) + (key << 8); // key * 265
+                key = key ^ (key >> 14);
+                key = (key + (key << 2)) + (key << 4); // key * 21
+                key = key ^ (key >> 28);
+                key = key + (key << 31);
+                key
             },
             HashMode::Fast => xxh3_64(&item.to_le_bytes()),
+        }
+    }
+
+    pub fn invert_hash(&self, item: u64) -> Option<u64> {
+        match self.hash_mode {
+            HashMode::Invertible => {
+                let mut tmp: u64;
+                let mut key = item;
+
+                // Invert key = key + (key << 31)
+                tmp = key-(key<<31);
+                key = key-(tmp<<31);
+
+                // Invert key = key ^ (key >> 28)
+                tmp = key^key>>28;
+                key = key^tmp>>28;
+
+                // Invert key *= 21
+                key = key.wrapping_mul(14933078535860113213);
+
+                // Invert key = key ^ (key >> 14)
+                tmp = key^key>>14;
+                tmp = key^tmp>>14;
+                tmp = key^tmp>>14;
+                key = key^tmp>>14;
+
+                // Invert key *= 265
+                key = key.wrapping_mul(15244667743933553977);
+
+                // Invert key = key ^ (key >> 24)
+                tmp = key^key>>24;
+                key = key^tmp>>24;
+
+                // Invert key = (~key) + (key << 21)
+                tmp = !key;
+                tmp = !(key.wrapping_sub(tmp<<21));
+                tmp = !(key.wrapping_sub(tmp<<21));
+                key = !(key.wrapping_sub(tmp<<21));
+
+                Some(key)
+            },
+            HashMode::Fast => None,
         }
     }
 
@@ -532,6 +576,7 @@ impl CQF {
 #[derive(Clone, Copy, Debug, PartialEq, PartialOrd, Eq, Hash)]
 pub struct FilterItem {
     pub hash: u64,
+    pub item: Option<u64>,
     pub count: u64
 }
 
@@ -625,7 +670,8 @@ impl<'a> Iterator for CQFIterator<'a> {
             self.first = false;
             let (mut current_remainder, mut current_count): (u64, u64) = (0, 0);
             self.qf.decode_counter(self.position, &mut current_remainder, &mut current_count);
-            return Some(FilterItem { hash: self.qf.build_hash(self.run, current_remainder), count: current_count });
+            let hash = self.qf.build_hash(self.run, current_remainder);
+            return Some(FilterItem { hash, item: self.qf.invert_hash(hash), count: current_count });
         }
         let can_move = self.move_position();
         if !can_move {
@@ -633,7 +679,8 @@ impl<'a> Iterator for CQFIterator<'a> {
         }
         let (mut current_remainder, mut current_count): (u64, u64) = (0, 0);
         self.qf.decode_counter(self.position, &mut current_remainder, &mut current_count);
-        Some(FilterItem { hash: self.qf.build_hash(self.run, current_remainder), count: current_count })
+        let hash = self.qf.build_hash(self.run, current_remainder);
+        Some(FilterItem { hash, item: self.qf.invert_hash(hash), count: current_count })
     }
 }
 
