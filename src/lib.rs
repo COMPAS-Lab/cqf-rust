@@ -1,5 +1,5 @@
 mod cqf;
-pub use cqf::CQF;
+pub use cqf::*;
 
 #[cfg(test)]
 mod tests {
@@ -11,7 +11,7 @@ mod tests {
 
     #[test]
     fn insert() -> Result<()> {
-        let mut qf = CQF::build(23, 23);
+        let mut qf = CQF::build(23, 23, HashMode::Fast);
 
         let n_strings: usize = 10_000_000;
         //let mut strings: Vec<String> = Vec::with_capacity(n_strings);
@@ -55,14 +55,20 @@ mod tests {
 
     #[test]
     fn insert_bench() -> Result<()> {
-        let mut qf = CQF::build(26, 26);
+        let mut qf = CQF::build(26, 26, HashMode::Invertible);
 
         let n_strings: usize = ((1 << 26) as f32 * 0.9) as usize;
+        let mut numbers: Vec<u64> = Vec::with_capacity(n_strings);
+
+        let mut rng = rand::thread_rng();
+        for _ in 0..n_strings {
+            numbers.push(rng.gen())
+        }
 
         let now = Instant::now();
-        for i in 1..n_strings+1 {
+        for i in 0..n_strings {
             //qf.insert(strings[i].as_bytes(), 3)?;
-            qf.insert(i as u64, 1)?;
+            qf.insert(numbers[i] as u64, 1)?;
         }
         let elapsed = now.elapsed();
         println!("insert took {} seconds!", elapsed.as_secs());
@@ -71,7 +77,7 @@ mod tests {
 
     #[test]
     fn enumerate() -> Result<()> {
-        let mut qf = CQF::build(25, 25);
+        let mut qf = CQF::build(25, 25, HashMode::Fast);
 
         let n_strings: usize = 10_000_000;
         let count = 3;
@@ -130,8 +136,8 @@ mod tests {
 
     #[test]
     fn merge() -> Result<()> {
-        let mut qf1 = CQF::build(25, 25);
-        let mut qf2 = CQF::build(25, 25);
+        let mut qf1 = CQF::build(25, 25, HashMode::Fast);
+        let mut qf2 = CQF::build(25, 25, HashMode::Fast);
 
         let n_strings: usize = 10_000_000;
         let count = 3;
@@ -186,7 +192,7 @@ mod tests {
 
     #[test]
     fn serialize() -> Result<()> {
-        let mut qf = CQF::build(23, 23);
+        let mut qf = CQF::build(23, 23, HashMode::Fast);
 
         let n_strings: usize = 10_000_000;
         //let mut strings: Vec<String> = Vec::with_capacity(n_strings);

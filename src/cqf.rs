@@ -15,6 +15,13 @@ struct Block {
     remainders: [u64; 64]
 }
 
+#[derive(Encode, Decode, PartialEq, Clone, Copy, Debug, Default)]
+pub enum HashMode {
+    Invertible,
+    #[default]
+    Fast
+}
+
 #[derive(Encode, Decode, Default)]
 pub struct CQF {
     lognslots: u64,
@@ -24,11 +31,12 @@ pub struct CQF {
     noccupied_slots: u64,
     quotient_bits: u64,
     remainder_bits: u64,
+    hash_mode: HashMode,
     blocks: Vec<Block>
 }
 
 impl CQF {
-    pub fn build(lognslots: u64, key_bits: u64) -> Self {
+    pub fn build(lognslots: u64, key_bits: u64, hash_mode: HashMode) -> Self {
         let nslots = 1 << lognslots;
         assert_eq!(nslots.popcnt(), 1, "nslots must be a power of 2!");
         let xnslots: u64 = (nslots as f32 + 10.0*((nslots as f32).sqrt())) as u64;
@@ -50,6 +58,7 @@ impl CQF {
             nblocks: nblocks,
             quotient_bits: key_bits, 
             remainder_bits: 64 - key_bits, 
+            hash_mode,
             blocks: blockvec,
             ..Default::default()
         }
@@ -58,38 +67,7 @@ impl CQF {
     pub fn from(qf1: Self, qf2: Self, lognslots: u64, key_bits: u64) -> Self {
         let nslots = 1 << lognslots;
         assert_eq!(nslots.popcnt(), 1, "nslots must be a power of 2!");
-        let xnslots: u64 = (nslots as f32 + 10.0*((nslots as f32).sqrt())) as u64;
-        let nblocks = (xnslots + 63) / 64;
-        let mut blockvec: Vec<Block> = Vec::with_capacity(nblocks.try_into().unwrap());
-        for _ in 0..nblocks {
-            blockvec.push(Block {
-                offset: 0,
-                occupieds: 0,
-                runends: 0,
-                counts: 0,
-                remainders: [0; 64]
-            });
-        }
-        let mut new = CQF { 
-            lognslots: lognslots,
-            nslots: nslots,
-            xnslots: xnslots,
-            nblocks: nblocks,
-            quotient_bits: key_bits, 
-            remainder_bits: 64 - key_bits, 
-            blocks: blockvec,
-            ..Default::default()
-        };
-        let merged = qf1.into_iter().merge(qf2.into_iter());
-        for item in merged {
-            new.insert_by_hash(item.hash, item.count).expect("couldn't insert into new CQF!");
-        }
-        new
-    }
-
-    pub fn from_multi(qfs: Vec<&Self>, lognslots: u64, key_bits: u64) -> Self {
-        let nslots = 1 << lognslots;
-        assert_eq!(nslots.popcnt(), 1, "nslots must be a power of 2!");
+        assert_eq!(qf1.hash_mode, qf2.hash_mode, "CQFs must have the same hash mode!");
         let xnslots: u64 = (nslots as f32 + 10.0*((nslots as f32).sqrt())) as u64;
         let nblocks = (xnslots + 63) / 64;
         let mut blockvec: Vec<Block> = Vec::with_capacity(nblocks.try_into().unwrap());
@@ -109,6 +87,41 @@ impl CQF {
             nblocks: nblocks,
             quotient_bits: key_bits, 
             remainder_bits: 64 - key_bits, 
+            hash_mode: qf1.hash_mode,
+            blocks: blockvec,
+            ..Default::default()
+        };
+        let merged = qf1.into_iter().merge(qf2.into_iter());
+        for item in merged {
+            new.insert_by_hash(item.hash, item.count).expect("couldn't insert into new CQF!");
+        }
+        new
+    }
+
+    pub fn from_multi(qfs: Vec<&Self>, lognslots: u64, key_bits: u64) -> Self {
+        let nslots = 1 << lognslots;
+        assert_eq!(nslots.popcnt(), 1, "nslots must be a power of 2!");
+        // should check each qf's hashmode here...
+        let xnslots: u64 = (nslots as f32 + 10.0*((nslots as f32).sqrt())) as u64;
+        let nblocks = (xnslots + 63) / 64;
+        let mut blockvec: Vec<Block> = Vec::with_capacity(nblocks.try_into().unwrap());
+        for _ in 0..nblocks {
+            blockvec.push(Block {
+                offset: 0,
+                occupieds: 0,
+                runends: 0,
+                counts: 0,
+                remainders: [0; 64]
+            });
+        }
+        let mut new = Self { 
+            lognslots: lognslots,
+            nslots: nslots,
+            xnslots: xnslots,
+            nblocks: nblocks,
+            quotient_bits: key_bits, 
+            remainder_bits: 64 - key_bits, 
+            hash_mode: qfs[0].hash_mode,
             blocks: blockvec,
             ..Default::default()
         };
@@ -141,6 +154,7 @@ impl CQF {
             nblocks: nblocks,
             quotient_bits: key_bits, 
             remainder_bits: 64 - key_bits, 
+            hash_mode: self.hash_mode,
             blocks: blockvec,
             ..Default::default()
         };
@@ -380,13 +394,18 @@ impl CQF {
     }
 
     fn calc_hash(&self, item: u64) -> u64 {
-        xxh3_64(&item.to_le_bytes())
-        //item ^= item >> 16;
-        //item *= 0xa812d533;
-        //item ^= item >> 15;
-        //item *= 0xb278e4ad;
-        //item ^= item >> 17;
-        //item
+        match self.hash_mode {
+            HashMode::Invertible => {
+                let mut tmp = item;
+                tmp ^= tmp >> 16;
+                tmp *= 0xa812d533;
+                tmp ^= tmp >> 15;
+                tmp *= 0xb278e4ad;
+                tmp ^= tmp >> 17;
+                tmp
+            },
+            HashMode::Fast => xxh3_64(&item.to_le_bytes()),
+        }
     }
 
     fn calc_qr(&self, hash: u64) -> (usize, u64) {
