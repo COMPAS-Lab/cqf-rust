@@ -187,21 +187,6 @@ impl CQF {
         return from;
     }
 
-    fn find_n_empty_slots(&self, mut from: usize, mut n: usize) -> Vec<usize> {
-        if n == 1 {
-            return vec![self.find_first_empty_slot(from)];
-        } else {
-            let mut empties: Vec<usize> = Vec::with_capacity(n);
-            while n != 0 {
-                let empty = self.find_first_empty_slot(from);
-                empties.push(empty);
-                from = empty + 1;
-                n -= 1;
-            }
-            return empties;
-        }
-    }
-
     fn shift_remainders(&mut self, insert_index: usize, empty_slot_index: usize, distance: usize) {
         for i in (insert_index..=empty_slot_index).rev() {
             self.set_slot(i + distance, self.get_slot(i));
@@ -289,19 +274,43 @@ impl CQF {
     fn insert_and_shift(&mut self, operation: u64, quotient: usize, remainder: u64, count: u64, insert_index: usize, noverwrites: usize) {
         let ninserts = if count == 1 { 1 } else { 2 } - noverwrites;
         if ninserts > 0 {
-            let empties = self.find_n_empty_slots(insert_index, ninserts);
-            for j in (0..ninserts-1).rev() {
-                self.shift_remainders(empties[j] + 1, empties[j + 1] - 1, j + 1);
+            match ninserts {
+                1 => {
+                    let empty = self.find_first_empty_slot(insert_index);
+                    self.shift_remainders(insert_index, empty - 1, 1);
+                    self.shift_runends(insert_index, empty - 1, 1);
+                    self.shift_counts(insert_index, empty - 1, 1);
+                    let mut npreceding_empties = 0;
+                    for i in (((quotient / 64) + 1)..).take_while(|i: &usize| *i <= empty / 64) {
+                        while npreceding_empties < ninserts && empty / 64 < i {
+                            npreceding_empties += 1;
+                        }
+
+                        self.get_block_mut(i).offset += (ninserts - npreceding_empties) as u16;
+                    }
+                },
+                2 => {
+                    let first = self.find_first_empty_slot(insert_index);
+                    let second = self.find_first_empty_slot(first + 1);
+                    self.shift_remainders(first + 1, second - 1, 1);
+                    self.shift_runends(first + 1, second - 1, 1);
+                    self.shift_counts(first + 1, second - 1, 1);
+                    self.shift_remainders(insert_index, first - 1, 2);
+                    self.shift_runends(insert_index, first - 1, 2);
+                    self.shift_counts(insert_index, first - 1, 2);
+
+                    let empties = [first, second];
+                    let mut npreceding_empties = 0;
+                    for i in (((quotient / 64) + 1)..).take_while(|i: &usize| *i <= empties[ninserts - 1] / 64) {
+                        while npreceding_empties < ninserts && empties[npreceding_empties] / 64 < i {
+                            npreceding_empties += 1;
+                        }
+
+                        self.get_block_mut(i).offset += (ninserts - npreceding_empties) as u16;
+                    }
+                },
+                _ => panic!("unexpected number of inserts!")
             }
-            self.shift_remainders(insert_index, empties[0] - 1, ninserts);
-            for j in (0..ninserts-1).rev() {
-                self.shift_runends(empties[j] + 1, empties[j + 1] - 1, j + 1);
-            }
-            self.shift_runends(insert_index, empties[0] - 1, ninserts);
-            for j in (0..ninserts-1).rev() {
-                self.shift_counts(empties[j] + 1, empties[j + 1] - 1, j + 1);
-            }
-            self.shift_counts(insert_index, empties[0] - 1, ninserts);
 
             match operation {
                 0 => {
@@ -331,16 +340,7 @@ impl CQF {
                         self.set_runend(insert_index + 1, false);
                     }
                 },
-                _ => (),
-            }
-
-            let mut npreceding_empties = 0;
-            for i in (((quotient / 64) + 1)..).take_while(|i: &usize| *i <= empties[ninserts - 1] / 64) {
-                while npreceding_empties < ninserts && empties[npreceding_empties] / 64 < i {
-                    npreceding_empties += 1;
-                }
-
-                self.get_block_mut(i).offset += (ninserts - npreceding_empties) as u16;
+                _ => panic!("invalid operation!"),
             }
         }
         
@@ -399,11 +399,11 @@ impl CQF {
                 let mut key = item;
                 key = (!key).wrapping_add(key << 21); // key = (key << 21) - key - 1;
                 key = key ^ (key >> 24);
-                key = (key + (key << 3)) + (key << 8); // key * 265
+                key = (key.wrapping_add(key << 3)).wrapping_add(key << 8); // key * 265
                 key = key ^ (key >> 14);
-                key = (key + (key << 2)) + (key << 4); // key * 21
+                key = (key.wrapping_add(key << 2)).wrapping_add(key << 4); // key * 21
                 key = key ^ (key >> 28);
-                key = key + (key << 31);
+                key = key.wrapping_add(key << 31);
                 key
             },
             HashMode::Fast => xxh3_64(&item.to_le_bytes()),
@@ -417,8 +417,8 @@ impl CQF {
                 let mut key = item;
 
                 // Invert key = key + (key << 31)
-                tmp = key-(key<<31);
-                key = key-(tmp<<31);
+                tmp = key.wrapping_sub(key<<31);
+                key = key.wrapping_sub(tmp<<31);
 
                 // Invert key = key ^ (key >> 28)
                 tmp = key^key>>28;
