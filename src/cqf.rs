@@ -280,13 +280,12 @@ impl CQF {
                     self.shift_remainders(insert_index, empty - 1, 1);
                     self.shift_runends(insert_index, empty - 1, 1);
                     self.shift_counts(insert_index, empty - 1, 1);
-                    let mut npreceding_empties = 0;
                     for i in (((quotient / 64) + 1)..).take_while(|i: &usize| *i <= empty / 64) {
-                        while npreceding_empties < ninserts && empty / 64 < i {
-                            npreceding_empties += 1;
+                        if empty / 64 < i {
+                            break;
                         }
 
-                        self.get_block_mut(i).offset += (ninserts - npreceding_empties) as u16;
+                        self.get_block_mut(i).offset += 1;
                     }
                 },
                 2 => {
@@ -299,11 +298,13 @@ impl CQF {
                     self.shift_runends(insert_index, first - 1, 2);
                     self.shift_counts(insert_index, first - 1, 2);
 
-                    let empties = [first, second];
                     let mut npreceding_empties = 0;
-                    for i in (((quotient / 64) + 1)..).take_while(|i: &usize| *i <= empties[ninserts - 1] / 64) {
-                        while npreceding_empties < ninserts && empties[npreceding_empties] / 64 < i {
+                    for i in (((quotient / 64) + 1)..).take_while(|i: &usize| *i <= second / 64) {
+                        if npreceding_empties == 0 && first / 64 < i {
                             npreceding_empties += 1;
+                        }
+                        if npreceding_empties == 1 && second / 64 < i {
+                            break;
                         }
 
                         self.get_block_mut(i).offset += (ninserts - npreceding_empties) as u16;
