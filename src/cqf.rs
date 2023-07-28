@@ -38,7 +38,6 @@ pub struct CQF {
 impl CQF {
     pub fn build(lognslots: u64, key_bits: u64, hash_mode: HashMode) -> Self {
         let nslots = 1 << lognslots;
-        assert_eq!(nslots.popcnt(), 1, "nslots must be a power of 2!");
         let xnslots: u64 = (nslots as f32 + 10.0*((nslots as f32).sqrt())) as u64;
         let nblocks = (xnslots + 63) / 64;
         let mut blockvec: Vec<Block> = Vec::with_capacity(nblocks.try_into().unwrap());
@@ -64,9 +63,9 @@ impl CQF {
         }
     }
 
-    pub fn from(qf1: Self, qf2: Self, lognslots: u64, key_bits: u64) -> Self {
+    pub fn from(qf1: Self, qf2: Self) -> Self {
+        let lognslots = u64::next_power_of_two(qf1.noccupied_slots + qf2.noccupied_slots).ilog2() as u64;
         let nslots = 1 << lognslots;
-        assert_eq!(nslots.popcnt(), 1, "nslots must be a power of 2!");
         assert_eq!(qf1.hash_mode, qf2.hash_mode, "CQFs must have the same hash mode!");
         let xnslots: u64 = (nslots as f32 + 10.0*((nslots as f32).sqrt())) as u64;
         let nblocks = (xnslots + 63) / 64;
@@ -85,8 +84,8 @@ impl CQF {
             nslots: nslots,
             xnslots: xnslots,
             nblocks: nblocks,
-            quotient_bits: key_bits, 
-            remainder_bits: 64 - key_bits, 
+            quotient_bits: lognslots, 
+            remainder_bits: 64 - lognslots, 
             hash_mode: qf1.hash_mode,
             blocks: blockvec,
             ..Default::default()
@@ -98,10 +97,13 @@ impl CQF {
         new
     }
 
-    pub fn from_multi(qfs: Vec<&Self>, lognslots: u64, key_bits: u64) -> Self {
+    pub fn from_multi(qfs: Vec<&Self>) -> Self {
+        let lognslots = u64::next_power_of_two(qfs.iter().map(|qf| qf.noccupied_slots).sum()).ilog2() as u64;
         let nslots = 1 << lognslots;
-        assert_eq!(nslots.popcnt(), 1, "nslots must be a power of 2!");
-        // should check each qf's hashmode here...
+        
+        let first = qfs[0];
+        assert!(qfs.iter().all(|&item| item.hash_mode == first.hash_mode), "all qfs must have the same hash mode!");
+
         let xnslots: u64 = (nslots as f32 + 10.0*((nslots as f32).sqrt())) as u64;
         let nblocks = (xnslots + 63) / 64;
         let mut blockvec: Vec<Block> = Vec::with_capacity(nblocks.try_into().unwrap());
@@ -119,8 +121,8 @@ impl CQF {
             nslots: nslots,
             xnslots: xnslots,
             nblocks: nblocks,
-            quotient_bits: key_bits, 
-            remainder_bits: 64 - key_bits, 
+            quotient_bits: lognslots, 
+            remainder_bits: 64 - lognslots, 
             hash_mode: qfs[0].hash_mode,
             blocks: blockvec,
             ..Default::default()

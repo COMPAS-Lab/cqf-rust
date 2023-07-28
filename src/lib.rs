@@ -152,7 +152,7 @@ mod tests {
             items.insert(item);
         }
 
-        let qf3 = CQF::from(qf1, qf2, 28, 28);
+        let qf3 = CQF::from(qf1, qf2);
 
         let mut merge_items = HashSet::with_capacity(n_strings);
         for item in qf3.into_iter() {
