@@ -17,6 +17,7 @@ struct Block {
 
 #[derive(Encode, Decode, PartialEq, Clone, Copy, Debug, Default)]
 pub enum HashMode {
+    None,
     Invertible,
     #[default]
     Fast
@@ -398,6 +399,7 @@ impl CQF {
 
     fn calc_hash(&self, item: u64) -> u64 {
         match self.hash_mode {
+            HashMode::None => item,
             HashMode::Invertible => {
                 let mut key = item;
                 key = (!key).wrapping_add(key << 21); // key = (key << 21) - key - 1;
@@ -415,6 +417,7 @@ impl CQF {
 
     pub fn invert_hash(&self, item: u64) -> Option<u64> {
         match self.hash_mode {
+            HashMode::None => Some(item),
             HashMode::Invertible => {
                 let mut tmp: u64;
                 let mut key = item;
